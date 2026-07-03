@@ -5,7 +5,7 @@
 接口: POST https://office.chaoxing.com/data/apps/seat/getusedseatnums
 
 用法:
-    1. 复制 .env.example 为 .env，并填写 COOKIE_RAW / DAY / START_TIME / END_TIME
+    1. 复制 .env.example 为 .env，并填写 CHAOXING_ACCOUNT / CHAOXING_PASSWORD / DAY / START_TIME / END_TIME
     2. 按需修改 ROOM_ID / FID_ENC
     3. 运行:
        python3 main.py
@@ -13,8 +13,13 @@
 """
 
 import argparse
+import base64
 import os
+from urllib.parse import unquote
+
 import requests
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 
 # ------------------ 配置区 ------------------
 
@@ -25,6 +30,13 @@ SEAT_MAX = 371                    # 当前房间最大座位号
 SEAT_WIDTH = 3                    # 座位号补零宽度，例如 1 -> 001
 
 URL = "https://office.chaoxing.com/data/apps/seat/getusedseatnums"
+LOGIN_URL = "https://passport2.chaoxing.com/fanyalogin"
+LOGIN_REFER = "https%3A%2F%2Fi.chaoxing.com"
+LOGIN_TRANSFER_KEY = "u2oh6Vu^HWe4_AES"
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+)
 
 
 def load_env_file(path: str = ".env") -> None:
@@ -41,8 +53,11 @@ def load_env_file(path: str = ".env") -> None:
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def get_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
+def get_env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def require_value(name: str, value: str) -> str:
     if not value:
         raise RuntimeError(f"缺少环境变量 {name}，请在 .env 中配置")
     return value
@@ -50,6 +65,8 @@ def get_env(name: str) -> str:
 
 load_env_file()
 COOKIE_RAW = get_env("COOKIE_RAW")
+CHAOXING_ACCOUNT = get_env("CHAOXING_ACCOUNT")
+CHAOXING_PASSWORD = get_env("CHAOXING_PASSWORD")
 DAY = get_env("DAY")                  # 查询日期，格式 YYYY-MM-DD
 START_TIME = get_env("START_TIME")    # 查询时段开始，格式 HH:MM
 END_TIME = get_env("END_TIME")        # 查询时段结束，格式 HH:MM
@@ -67,6 +84,22 @@ def parse_cookie(raw: str) -> dict:
     return cookies
 
 
+def encrypt_by_aes(message: str, key: str = LOGIN_TRANSFER_KEY) -> str:
+    """复刻登录页 CryptoJS AES-CBC-PKCS7 加密，Key 和 IV 相同。"""
+    key_bytes = key.encode("utf-8")
+    cipher = AES.new(key_bytes, AES.MODE_CBC, iv=key_bytes)
+    encrypted = cipher.encrypt(pad(message.encode("utf-8"), AES.block_size))
+    return base64.b64encode(encrypted).decode("utf-8")
+
+
+def build_cookie_header(cookies: dict) -> str:
+    return "; ".join(f"{key}={value}" for key, value in cookies.items())
+
+
+def build_base_headers() -> dict:
+    return {"User-Agent": USER_AGENT}
+
+
 def build_referer(room_id: str, fid_enc: str, day: str) -> str:
     return (
         "https://office.chaoxing.com/front/third/apps/seat/select"
@@ -76,10 +109,7 @@ def build_referer(room_id: str, fid_enc: str, day: str) -> str:
 
 def build_headers(room_id: str, fid_enc: str, day: str) -> dict:
     return {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": USER_AGENT,
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://office.chaoxing.com",
@@ -99,11 +129,75 @@ def normalize_seat_num(value, width: int = SEAT_WIDTH) -> str:
     return text.zfill(width) if text.isdigit() else text
 
 
-def query_seats(room_id=ROOM_ID, fid_enc=FID_ENC, day=DAY,
-                 start_time=START_TIME, end_time=END_TIME):
-    """查询指定房间/时段的座位占用情况。"""
+def login(account: str, password: str) -> requests.Session:
+    """使用账号密码登录学习通，并返回带登录 Cookie 的 Session。"""
     session = requests.Session()
-    cookies = parse_cookie(COOKIE_RAW)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://passport2.chaoxing.com",
+        "Referer": f"https://passport2.chaoxing.com/login?refer={LOGIN_REFER}",
+    }
+    data = {
+        "fid": "-1",
+        "uname": encrypt_by_aes(account),
+        "password": encrypt_by_aes(password),
+        "refer": LOGIN_REFER,
+        "t": "true",
+        "forbidotherlogin": "0",
+        "validate": "",
+        "doubleFactorLogin": "0",
+        "independentId": "0",
+        "independentNameId": "0",
+    }
+
+    resp = session.post(LOGIN_URL, headers=headers, data=data, timeout=10)
+    resp.raise_for_status()
+    result = resp.json()
+    if not result.get("status"):
+        message = result.get("msg2") or result.get("msg") or result
+        raise RuntimeError(f"登录失败：{message}")
+    if result.get("containTwoFactorLogin"):
+        raise RuntimeError("登录需要二次验证，当前脚本无法自动完成")
+
+    redirect_url = unquote(result.get("url", ""))
+    if redirect_url.startswith("http"):
+        session.get(redirect_url, headers=build_base_headers(), timeout=10)
+
+    return session
+
+
+def build_session(cookie_raw: str = COOKIE_RAW,
+                  account: str = CHAOXING_ACCOUNT,
+                  password: str = CHAOXING_PASSWORD) -> requests.Session:
+    """优先使用现成 Cookie；没有 Cookie 时用账号密码自动登录。"""
+    session = requests.Session()
+    if cookie_raw:
+        cookies = parse_cookie(cookie_raw)
+        session.headers.update({"Cookie": build_cookie_header(cookies)})
+        return session
+
+    account = require_value("CHAOXING_ACCOUNT", account)
+    password = require_value("CHAOXING_PASSWORD", password)
+    return login(account, password)
+
+
+def prepare_office_session(session: requests.Session, room_id: str,
+                           fid_enc: str, day: str) -> None:
+    """访问座位页面，补齐 office.chaoxing.com 业务 Cookie。"""
+    session.get(
+        build_referer(room_id, fid_enc, day),
+        headers=build_base_headers(),
+        timeout=10,
+        allow_redirects=True,
+    )
+
+
+def query_seats(room_id=ROOM_ID, fid_enc=FID_ENC, day=DAY,
+                 start_time=START_TIME, end_time=END_TIME, session=None):
+    """查询指定房间/时段的座位占用情况。"""
+    session = session or build_session()
+    prepare_office_session(session, room_id, fid_enc, day)
 
     data = {
         "roomId": room_id,
@@ -114,7 +208,7 @@ def query_seats(room_id=ROOM_ID, fid_enc=FID_ENC, day=DAY,
     }
 
     headers = build_headers(room_id, fid_enc, day)
-    resp = session.post(URL, headers=headers, cookies=cookies, data=data, timeout=10)
+    resp = session.post(URL, headers=headers, data=data, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -152,12 +246,17 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    args.day = require_value("DAY", args.day)
+    args.start = require_value("START_TIME", args.start)
+    args.end = require_value("END_TIME", args.end)
+    session = build_session()
     result = query_seats(
         room_id=args.room_id,
         fid_enc=args.fid_enc,
         day=args.day,
         start_time=args.start,
         end_time=args.end,
+        session=session,
     )
 
     if not result.get("success"):
