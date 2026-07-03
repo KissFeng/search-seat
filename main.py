@@ -5,11 +5,7 @@
 接口: POST https://office.chaoxing.com/data/apps/seat/getusedseatnums
 
 用法:
-    1. 复制 .env.example 为 .env，并填写 CHAOXING_ACCOUNT / CHAOXING_PASSWORD / DAY / START_TIME / END_TIME
-    2. 按需修改 ROOM_ID / FID_ENC
-    3. 运行:
-       python3 main.py
-       python3 main.py --day 2026-07-03 --start 14:00 --end 16:00
+    python3 main.py --account 学习通账号 --password 学习通密码 --day 2026-07-03 --start 15:00 --end 16:00
 """
 
 import argparse
@@ -39,37 +35,14 @@ USER_AGENT = (
 )
 
 
-def load_env_file(path: str = ".env") -> None:
-    """加载简单 KEY=VALUE 格式的 .env，不覆盖系统里已存在的环境变量。"""
-    if not os.path.exists(path):
-        return
-
-    with open(path, "r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
 def get_env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
 def require_value(name: str, value: str) -> str:
     if not value:
-        raise RuntimeError(f"缺少环境变量 {name}，请在 .env 中配置")
+        raise RuntimeError(f"缺少 {name}")
     return value
-
-
-load_env_file()
-COOKIE_RAW = get_env("COOKIE_RAW")
-CHAOXING_ACCOUNT = get_env("CHAOXING_ACCOUNT")
-CHAOXING_PASSWORD = get_env("CHAOXING_PASSWORD")
-DAY = get_env("DAY")                  # 查询日期，格式 YYYY-MM-DD
-START_TIME = get_env("START_TIME")    # 查询时段开始，格式 HH:MM
-END_TIME = get_env("END_TIME")        # 查询时段结束，格式 HH:MM
 
 
 def parse_cookie(raw: str) -> dict:
@@ -167,9 +140,8 @@ def login(account: str, password: str) -> requests.Session:
     return session
 
 
-def build_session(cookie_raw: str = COOKIE_RAW,
-                  account: str = CHAOXING_ACCOUNT,
-                  password: str = CHAOXING_PASSWORD) -> requests.Session:
+def build_session(cookie_raw: str = "", account: str = "",
+                  password: str = "") -> requests.Session:
     """优先使用现成 Cookie；没有 Cookie 时用账号密码自动登录。"""
     session = requests.Session()
     if cookie_raw:
@@ -177,8 +149,8 @@ def build_session(cookie_raw: str = COOKIE_RAW,
         session.headers.update({"Cookie": build_cookie_header(cookies)})
         return session
 
-    account = require_value("CHAOXING_ACCOUNT", account)
-    password = require_value("CHAOXING_PASSWORD", password)
+    account = require_value("学习通账号", account)
+    password = require_value("学习通密码", password)
     return login(account, password)
 
 
@@ -193,8 +165,8 @@ def prepare_office_session(session: requests.Session, room_id: str,
     )
 
 
-def query_seats(room_id=ROOM_ID, fid_enc=FID_ENC, day=DAY,
-                 start_time=START_TIME, end_time=END_TIME, session=None):
+def query_seats(room_id=ROOM_ID, fid_enc=FID_ENC, day="",
+                 start_time="", end_time="", session=None):
     """查询指定房间/时段的座位占用情况。"""
     session = session or build_session()
     prepare_office_session(session, room_id, fid_enc, day)
@@ -232,11 +204,14 @@ def get_available_seats(result: dict, all_seats: list,
 
 def parse_args():
     parser = argparse.ArgumentParser(description="查询超星图书馆指定时段可预约座位")
+    parser.add_argument("--account", default="", help="学习通账号")
+    parser.add_argument("--password", default="", help="学习通密码")
+    parser.add_argument("--cookie", default="", help="浏览器里的完整 Cookie，可替代账号密码")
     parser.add_argument("--room-id", default=ROOM_ID, help="房间 ID")
     parser.add_argument("--fid-enc", default=FID_ENC, help="fidEnc / deptIdEnc")
-    parser.add_argument("--day", default=DAY, help="查询日期，格式 YYYY-MM-DD")
-    parser.add_argument("--start", default=START_TIME, help="开始时间，格式 HH:MM")
-    parser.add_argument("--end", default=END_TIME, help="结束时间，格式 HH:MM")
+    parser.add_argument("--day", required=True, help="查询日期，格式 YYYY-MM-DD")
+    parser.add_argument("--start", required=True, help="开始时间，格式 HH:MM")
+    parser.add_argument("--end", required=True, help="结束时间，格式 HH:MM")
     parser.add_argument("--seat-min", type=int, default=SEAT_MIN, help="最小座位号")
     parser.add_argument("--seat-max", type=int, default=SEAT_MAX, help="最大座位号")
     parser.add_argument("--seat-width", type=int, default=SEAT_WIDTH, help="座位号补零宽度")
@@ -246,10 +221,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    args.day = require_value("DAY", args.day)
-    args.start = require_value("START_TIME", args.start)
-    args.end = require_value("END_TIME", args.end)
-    session = build_session()
+    session = build_session(args.cookie, args.account, args.password)
     result = query_seats(
         room_id=args.room_id,
         fid_enc=args.fid_enc,
