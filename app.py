@@ -4,6 +4,7 @@
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
+import queue
 import threading
 import time
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -23,6 +24,8 @@ WATCH_STATUS_LABELS = {
 }
 WATCH_WORKER_STARTED = False
 WATCH_WORKER_LOCK = threading.Lock()
+WATCH_ALERT_SUBSCRIBERS = {}
+WATCH_ALERT_SUBSCRIBERS_LOCK = threading.Lock()
 
 
 def json_default(value):
@@ -289,6 +292,7 @@ def save_query_history(user_id: int, payload: dict) -> None:
 
 def public_watch_task(row: dict) -> dict:
     matched_seats = loads(row.get("matched_seats_json") or "[]") if row.get("matched_seats_json") else []
+    reserve_url = local_reserve_path(row["room_id"], row["day"], matched_seats[0]) if matched_seats else ""
     return {
         "id": row["id"],
         "room_id": row["room_id"],
@@ -302,6 +306,9 @@ def public_watch_task(row: dict) -> dict:
         "status": row["status"],
         "status_label": WATCH_STATUS_LABELS.get(row["status"], row["status"]),
         "matched_seats": matched_seats,
+        "reserve_url": reserve_url,
+        "reminder_ack_at": row.get("reminder_ack_at") or "",
+        "reminder_action": row.get("reminder_action") or "",
         "last_checked_at": row["last_checked_at"],
         "next_check_at": row["next_check_at"],
         "expires_at": row["expires_at"],
@@ -316,7 +323,8 @@ def fetch_watch_tasks(user_id: int) -> list:
         SELECT id, user_id, room_id, fid_enc, day, start_time, end_time,
                target_seats_json, ignore_no_power, ignore_sunny, webhook_url,
                interval_seconds, status, matched_seats_json, last_checked_at,
-               next_check_at, expires_at, last_error, created_at
+               next_check_at, expires_at, last_error, created_at,
+               reminder_ack_at, reminder_action
         FROM seat_watch_tasks
         WHERE user_id = %s
         ORDER BY id DESC
@@ -325,6 +333,90 @@ def fetch_watch_tasks(user_id: int) -> list:
         (user_id,),
     )
     return [public_watch_task(row) for row in rows]
+
+
+def build_watch_alert(task: dict, matched_seats: list) -> dict:
+    return {
+        "id": task["id"],
+        "room_id": task["room_id"],
+        "room_name": room_label(task["room_id"]),
+        "day": str(task["day"]),
+        "start_time": task["start_time"],
+        "end_time": task["end_time"],
+        "status": "matched",
+        "status_label": WATCH_STATUS_LABELS["matched"],
+        "matched_seats": matched_seats,
+        "reserve_url": local_reserve_path(str(task["room_id"]), str(task["day"]), matched_seats[0]) if matched_seats else "",
+    }
+
+
+def subscribe_watch_alerts(user_id: int):
+    subscriber = queue.Queue(maxsize=20)
+    with WATCH_ALERT_SUBSCRIBERS_LOCK:
+        WATCH_ALERT_SUBSCRIBERS.setdefault(user_id, set()).add(subscriber)
+    return subscriber
+
+
+def unsubscribe_watch_alerts(user_id: int, subscriber) -> None:
+    with WATCH_ALERT_SUBSCRIBERS_LOCK:
+        subscribers = WATCH_ALERT_SUBSCRIBERS.get(user_id)
+        if not subscribers:
+            return
+        subscribers.discard(subscriber)
+        if not subscribers:
+            WATCH_ALERT_SUBSCRIBERS.pop(user_id, None)
+
+
+def publish_watch_alert(user_id: int, alert: dict) -> None:
+    with WATCH_ALERT_SUBSCRIBERS_LOCK:
+        subscribers = list(WATCH_ALERT_SUBSCRIBERS.get(user_id, ()))
+    for subscriber in subscribers:
+        try:
+            subscriber.put_nowait(alert)
+        except queue.Full:
+            try:
+                subscriber.get_nowait()
+                subscriber.put_nowait(alert)
+            except queue.Empty:
+                pass
+
+
+def fetch_watch_alerts(user_id: int) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT id, user_id, room_id, fid_enc, day, start_time, end_time,
+               target_seats_json, ignore_no_power, ignore_sunny, webhook_url,
+               interval_seconds, status, matched_seats_json, last_checked_at,
+               next_check_at, expires_at, last_error, created_at,
+               reminder_ack_at, reminder_action
+        FROM seat_watch_tasks
+        WHERE user_id = %s
+          AND status = 'matched'
+          AND reminder_ack_at IS NULL
+        ORDER BY last_checked_at ASC, id ASC
+        LIMIT 20
+        """,
+        (user_id,),
+    )
+    return [public_watch_task(row) for row in rows]
+
+
+def acknowledge_watch_alert(user_id: int, task_id: int, action: str) -> int:
+    if action not in {"reserve", "confirm"}:
+        raise ValueError("提醒操作不正确")
+    return database.execute(
+        """
+        UPDATE seat_watch_tasks
+        SET reminder_ack_at = NOW(),
+            reminder_action = %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND user_id = %s
+          AND status = 'matched'
+          AND reminder_ack_at IS NULL
+        """,
+        (action, task_id, user_id),
+    )
 
 
 def send_watch_webhook(task: dict, matched_seats: list) -> None:
@@ -458,6 +550,7 @@ def process_watch_task(task: dict) -> None:
     matched = [item["seat"] for item in response["available"]]
     if matched:
         finish_watch_task(task["id"], "matched", matched)
+        publish_watch_alert(task["user_id"], build_watch_alert(task, matched))
         try:
             send_watch_webhook(task, matched)
         except Exception as exc:
@@ -514,6 +607,8 @@ def start_watch_worker() -> None:
 
 
 class AppHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):
         return
 
@@ -570,6 +665,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/watch-tasks":
             self.handle_watch_tasks()
             return
+        if path == "/api/watch-alerts":
+            self.handle_watch_alerts()
+            return
+        if path == "/api/watch-alerts/stream":
+            self.handle_watch_alert_stream()
+            return
         if path.startswith("/api/history/"):
             self.handle_history_detail(path)
             return
@@ -609,6 +710,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/watch-tasks/") and path.endswith("/cancel"):
                 self.handle_watch_task_cancel(path)
+                return
+            if path.startswith("/api/watch-alerts/") and path.endswith("/ack"):
+                self.handle_watch_alert_ack(path)
                 return
             self.send_json(404, {"error": "not found"})
         except JSONDecodeError:
@@ -722,6 +826,39 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         self.send_json(200, {"tasks": fetch_watch_tasks(user["id"])})
 
+    def handle_watch_alerts(self):
+        user = self.require_user()
+        if not user:
+            return
+        self.send_json(200, {"alerts": fetch_watch_alerts(user["id"])})
+
+    def handle_watch_alert_stream(self):
+        user = self.require_user()
+        if not user:
+            return
+        subscriber = subscribe_watch_alerts(user["id"])
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    alert = subscriber.get(timeout=25)
+                    payload = dumps(alert, ensure_ascii=False, default=json_default)
+                    self.wfile.write(f"event: alert\ndata: {payload}\n\n".encode("utf-8"))
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            unsubscribe_watch_alerts(user["id"], subscriber)
+
     def handle_watch_task_create(self):
         user = self.require_user()
         if not user:
@@ -791,6 +928,16 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         self.send_json(200, {"ok": True, "tasks": fetch_watch_tasks(user["id"])})
 
+    def handle_watch_alert_ack(self, path: str):
+        user = self.require_user()
+        if not user:
+            return
+        task_id = self.watch_alert_id_from_path(path)
+        payload = self.read_json()
+        action = str(payload.get("action") or "").strip()
+        changed = acknowledge_watch_alert(user["id"], task_id, action)
+        self.send_json(200, {"ok": True, "changed": changed, "alerts": fetch_watch_alerts(user["id"])})
+
     def history_id_from_path(self, path: str) -> int:
         parts = [part for part in path.split("/") if part]
         try:
@@ -804,6 +951,13 @@ class AppHandler(BaseHTTPRequestHandler):
             return int(parts[2])
         except (IndexError, ValueError) as exc:
             raise ValueError("蹲座位任务 ID 不正确") from exc
+
+    def watch_alert_id_from_path(self, path: str) -> int:
+        parts = [part for part in path.split("/") if part]
+        try:
+            return int(parts[2])
+        except (IndexError, ValueError) as exc:
+            raise ValueError("提醒 ID 不正确") from exc
 
     def handle_chaoxing_login(self):
         payload = self.read_json()
@@ -907,6 +1061,16 @@ INDEX_HTML = r"""
     .muted { color: #64748b; font-size: 13px; }
     .ok { color: #166534; }
     .bad { color: #b91c1c; }
+    .disclaimer { border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 12px; margin: 12px 0 14px; }
+    .disclaimer h3 { margin: 0 0 10px; color: #172033; font-size: 14px; }
+    .disclaimer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .disclaimer-item { border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; padding: 10px; min-width: 0; }
+    .disclaimer-item b { display: block; color: #0f766e; font-size: 13px; margin-bottom: 4px; }
+    .disclaimer-item span { display: block; color: #475569; font-size: 12px; line-height: 1.5; }
+    .disclaimer a { color: #0f766e; font-weight: 700; text-decoration: none; }
+    .disclaimer a:hover { text-decoration: underline; }
+    .auth .disclaimer-grid { grid-template-columns: 1fr; }
+    .disclaimer.compact { margin-top: 0; }
     .wide { grid-column: span 2; }
     .full { grid-column: 1 / -1; }
     .hidden { display: none !important; }
@@ -930,6 +1094,7 @@ INDEX_HTML = r"""
     .section-head h2 { margin: 0; }
     .section-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .table-actions { display: inline-flex; gap: 8px; align-items: center; white-space: nowrap; }
+    .mobile-list { display: none; }
     .text-button { min-height: 0; padding: 5px 8px; border: 1px solid #cbd5e1; background: #fff; color: #0f172a; font-size: 12px; }
     .text-button.danger { color: #b91c1c; border-color: #fecaca; }
     .status-pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; background: #e0f2fe; color: #075985; font-size: 12px; white-space: nowrap; }
@@ -941,6 +1106,20 @@ INDEX_HTML = r"""
     .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .modal-head h2 { margin: 0 0 6px; }
     .modal-empty { border: 1px solid #fde68a; background: #fffbeb; color: #92400e; border-radius: 8px; padding: 14px; }
+    .alert-panel { width: min(520px, 100%); }
+    .alert-seat-list { margin: 12px 0 0; padding: 10px; border-radius: 8px; background: #f8fafc; color: #0f172a; line-height: 1.55; }
+    .alert-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+    .alert-actions button { width: 100%; }
+    .webhook-details { border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+    .webhook-details summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px 12px; color: #334155; font-size: 13px; font-weight: 600; }
+    .webhook-details summary::-webkit-details-marker { display: none; }
+    .webhook-details summary::before { content: "展开"; min-width: 34px; color: #0f766e; font-weight: 700; }
+    .webhook-details[open] summary::before { content: "收起"; }
+    .webhook-summary { margin-left: auto; color: #64748b; font-size: 12px; font-weight: 400; text-align: right; }
+    .webhook-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 12px 12px; }
+    .start-watch-panel { width: min(520px, 100%); }
+    .start-watch-text { margin: 0; color: #334155; line-height: 1.65; font-size: 14px; }
+    .start-watch-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
     @media (max-width: 820px) {
       header { padding: 8px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); align-items: flex-start; }
       h1 { line-height: 40px; }
@@ -948,7 +1127,15 @@ INDEX_HTML = r"""
       #username { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       main { width: calc(100vw - 16px); padding: 10px 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
       section { padding: 14px; margin-bottom: 10px; }
-      form { grid-template-columns: 1fr; gap: 10px; }
+      form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      #authForm, #watchForm { grid-template-columns: 1fr; }
+      .disclaimer { padding: 10px; }
+      .disclaimer-grid { grid-template-columns: 1fr; }
+      #queryForm label:nth-child(1), #queryForm label:nth-child(2), #queryForm button { grid-column: 1 / -1; }
+      #queryForm label:nth-child(3), #queryForm label:nth-child(4) { grid-column: span 1; }
+      #queryForm label.row { grid-column: span 1; align-content: center; min-height: 42px; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f8fafc; gap: 8px; }
+      #queryForm label.row span { font-size: 13px; }
+      #queryForm label.row input { flex: 0 0 auto; }
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
       .stat { padding: 10px; }
       .stat b { font-size: 18px; }
@@ -958,26 +1145,40 @@ INDEX_HTML = r"""
       .section-head { align-items: stretch; flex-direction: row; }
       .section-head h2 { align-self: center; }
       .section-actions { justify-content: flex-end; }
+      #deleteSelectedHistoryBtn { display: none; }
       .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
       .tab { width: 100%; padding-left: 8px; padding-right: 8px; }
       .seat-grid { grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 6px; }
       .pair-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
       .seat, .pair { padding: 9px 6px; min-height: 38px; }
-      .responsive-table, .responsive-table tbody, .responsive-table tr, .responsive-table td { display: block; width: 100%; }
-      .responsive-table thead { display: none; }
-      .responsive-table tr { border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; padding: 8px 10px; margin-bottom: 10px; }
-      .responsive-table td { border-bottom: 1px solid #f1f5f9; padding: 8px 0; font-size: 13px; }
-      .responsive-table td:last-child { border-bottom: 0; }
-      .responsive-table td::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #64748b; font-size: 12px; font-weight: 600; }
-      .responsive-table td[data-label=""]::before { display: none; }
-      .responsive-table td[colspan] { color: #64748b; }
-      .responsive-table td[colspan]::before { display: none; }
+      .responsive-table { display: none; }
+      .mobile-list { display: grid; gap: 8px; }
+      .mobile-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #fff; }
+      .mobile-card-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+      .mobile-card-actions { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+      .mobile-title { font-size: 15px; font-weight: 700; color: #172033; }
+      .mobile-subtitle { margin-top: 3px; color: #64748b; font-size: 12px; }
+      .mobile-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+      .mobile-meta-item { border-radius: 8px; background: #f8fafc; padding: 8px; min-width: 0; }
+      a.mobile-meta-item { display: block; color: inherit; text-decoration: none; border: 1px solid transparent; }
+      a.mobile-meta-item:hover { border-color: #0f766e; }
+      .mobile-meta-item span { display: block; color: #64748b; font-size: 11px; line-height: 1.2; }
+      .mobile-meta-item b { display: block; margin-top: 3px; color: #0f172a; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mobile-meta-item.wide { grid-column: span 2; }
+      .mobile-meta-item.wrap b { font-size: 12px; line-height: 1.35; overflow: visible; text-overflow: clip; white-space: normal; word-break: break-word; }
+      .mobile-card-foot { display: flex; justify-content: flex-end; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
+      .mobile-empty { color: #64748b; font-size: 13px; padding: 12px; text-align: center; border: 1px dashed #cbd5e1; border-radius: 8px; }
       .check-cell { width: auto; text-align: left; }
       .table-actions { display: flex; gap: 8px; }
       .table-actions .text-button { flex: 1; }
       .modal { padding: 0; align-items: stretch; }
       .modal-panel { width: 100%; max-height: 100vh; border-radius: 0; border-left: 0; border-right: 0; padding: 14px; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
       .modal-head { flex-direction: column; }
+      .alert-actions { grid-template-columns: 1fr; }
+      .webhook-fields { grid-template-columns: 1fr; }
+      .webhook-details summary { align-items: flex-start; }
+      .webhook-summary { max-width: 48vw; }
+      .start-watch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -993,6 +1194,23 @@ INDEX_HTML = r"""
   <main>
     <section id="authPanel" class="auth">
       <h2>学习通登录</h2>
+      <div class="disclaimer compact">
+        <h3>使用前说明</h3>
+        <div class="disclaimer-grid">
+          <div class="disclaimer-item">
+            <b>账号安全</b>
+            <span>学习通账号仅用于查询座位和跳转预约座位，不会对外泄漏。</span>
+          </div>
+          <div class="disclaimer-item">
+            <b>使用范围</b>
+            <span>本项目仅供学习研究使用，请遵守学校和学习通相关规则。</span>
+          </div>
+          <div class="disclaimer-item">
+            <b>问题反馈</b>
+            <span>如有问题可联系 <a href="https://wpa.qq.com/msgrd?v=3&uin=26699525&site=qq&menu=yes" target="_blank" rel="noreferrer">Power</a>。</span>
+          </div>
+        </div>
+      </div>
       <form id="authForm">
         <label>学习通账号
           <input name="account" autocomplete="username" required>
@@ -1015,6 +1233,24 @@ INDEX_HTML = r"""
             <div id="cxStatus" class="muted"></div>
           </div>
           <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
+        </div>
+      </section>
+
+      <section class="disclaimer">
+        <h3>免责声明</h3>
+        <div class="disclaimer-grid">
+          <div class="disclaimer-item">
+            <b>账号安全</b>
+            <span>账号信息仅用于本机当前服务查询座位、预约跳转和必要的登录状态维护，不会主动泄漏或分享给第三方。</span>
+          </div>
+          <div class="disclaimer-item">
+            <b>学习研究</b>
+            <span>本项目仅供学习研究使用，请勿用于违规抢占资源或影响他人正常使用。</span>
+          </div>
+          <div class="disclaimer-item">
+            <b>联系 Power</b>
+            <span>遇到问题可通过 QQ <a href="https://wpa.qq.com/msgrd?v=3&uin=26699525&site=qq&menu=yes" target="_blank" rel="noreferrer">26699525</a> 联系。</span>
+          </div>
         </div>
       </section>
 
@@ -1074,13 +1310,21 @@ INDEX_HTML = r"""
           <label>轮询间隔
             <input name="interval_seconds" type="number" min="15" max="3600" value="60" required>
           </label>
-          <label class="wide">Webhook
-            <input name="webhook_url" type="url" placeholder="https://">
-          </label>
-          <label class="row wide">
-            <input name="save_webhook" type="checkbox" style="width: auto;">
-            <span>保存 Webhook，下次自动填入</span>
-          </label>
+          <details class="webhook-details full" id="webhookDetails">
+            <summary>
+              <span>Webhook 通知</span>
+              <span class="webhook-summary" id="webhookSummary">未设置</span>
+            </summary>
+            <div class="webhook-fields">
+              <label>Webhook
+                <input name="webhook_url" type="url" placeholder="https://">
+              </label>
+              <label class="row">
+                <input name="save_webhook" type="checkbox" style="width: auto;">
+                <span>保存 Webhook，下次自动填入</span>
+              </label>
+            </div>
+          </details>
           <button type="submit">开启蹲座位</button>
         </form>
         <div class="message" id="watchMessage"></div>
@@ -1100,6 +1344,7 @@ INDEX_HTML = r"""
           </thead>
           <tbody id="watchRows"></tbody>
         </table>
+        <div class="mobile-list" id="watchCards"></div>
       </section>
 
       <section>
@@ -1126,6 +1371,7 @@ INDEX_HTML = r"""
           </thead>
           <tbody id="historyRows"></tbody>
         </table>
+        <div class="mobile-list" id="historyCards"></div>
       </section>
     </div>
   </main>
@@ -1158,6 +1404,41 @@ INDEX_HTML = r"""
     </div>
   </div>
 
+  <div id="startWatchModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-panel start-watch-panel">
+      <div class="modal-head">
+        <div>
+          <h2>开启蹲座位提醒</h2>
+          <div class="muted">任务创建后会按轮询间隔自动检查</div>
+        </div>
+      </div>
+      <p class="start-watch-text">
+        命中座位后会弹窗提醒，并发起一次 App 系统通知。App 被系统完全关闭时，本地通知可能无法送达；已保存的 Webhook 会随任务一起生效，即使当前折叠也会继续发送。
+      </p>
+      <div class="start-watch-actions">
+        <button class="ghost" id="startWatchCancel" type="button">取消</button>
+        <button id="startWatchContinue" type="button">继续开启</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="watchAlertModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-panel alert-panel">
+      <div class="modal-head">
+        <div>
+          <h2>找到可预约座位</h2>
+          <div id="watchAlertMeta" class="muted"></div>
+        </div>
+      </div>
+      <div id="watchAlertSeats" class="alert-seat-list"></div>
+      <div class="alert-actions">
+        <button class="ghost" id="watchAlertCancel" type="button">取消</button>
+        <button id="watchAlertReserve" type="button">预约</button>
+        <button class="secondary" id="watchAlertConfirm" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const authPanel = document.querySelector('#authPanel');
 const appPanel = document.querySelector('#appPanel');
@@ -1173,6 +1454,8 @@ const cxStatus = document.querySelector('#cxStatus');
 const officialLink = document.querySelector('#officialLink');
 const historyRows = document.querySelector('#historyRows');
 const watchRows = document.querySelector('#watchRows');
+const historyCards = document.querySelector('#historyCards');
+const watchCards = document.querySelector('#watchCards');
 const historySelectAll = document.querySelector('#historySelectAll');
 const deleteSelectedHistoryBtn = document.querySelector('#deleteSelectedHistoryBtn');
 const refreshWatchBtn = document.querySelector('#refreshWatchBtn');
@@ -1189,14 +1472,32 @@ const historyModalEmpty = document.querySelector('#historyModalEmpty');
 const historyModalContent = document.querySelector('#historyModalContent');
 const modalSeatGrid = document.querySelector('#modalSeatGrid');
 const modalPairGrid = document.querySelector('#modalPairGrid');
+const watchAlertModal = document.querySelector('#watchAlertModal');
+const watchAlertMeta = document.querySelector('#watchAlertMeta');
+const watchAlertSeats = document.querySelector('#watchAlertSeats');
+const watchAlertCancel = document.querySelector('#watchAlertCancel');
+const watchAlertReserve = document.querySelector('#watchAlertReserve');
+const watchAlertConfirm = document.querySelector('#watchAlertConfirm');
+const webhookDetails = document.querySelector('#webhookDetails');
+const webhookSummary = document.querySelector('#webhookSummary');
+const startWatchModal = document.querySelector('#startWatchModal');
+const startWatchCancel = document.querySelector('#startWatchCancel');
+const startWatchContinue = document.querySelector('#startWatchContinue');
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
 const DEFAULT_HISTORY_LIMIT = 3;
+const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
 let latestResult = null;
 let officialIndexUrl = '';
 let historyItems = [];
 let watchItems = [];
 let showAllHistory = false;
 let showAllWatch = false;
+let activeWatchAlert = null;
+let currentAlerts = [];
+const dismissedAlertIds = new Set();
+let startWatchResolver = null;
+let watchAlertSource = null;
+let watchAlertReconnectTimer = null;
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -1224,6 +1525,160 @@ async function api(path, options = {}) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || '请求失败');
   return data;
+}
+
+function alertTitle(alert) {
+  return `${alert.room_name || alert.room_id} 有可预约座位`;
+}
+
+function alertBody(alert) {
+  const matched = alert.matched_seats || [];
+  const seats = matched.length > 8
+    ? `${matched.slice(0, 8).join(', ')} 等 ${matched.length} 个`
+    : matched.join(', ');
+  return `${alert.day} ${alert.start_time}-${alert.end_time} · ${seats}`;
+}
+
+function notifiedAlertIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('searchSeatNotifiedAlerts') || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveNotifiedAlertIds(ids) {
+  localStorage.setItem('searchSeatNotifiedAlerts', JSON.stringify(Array.from(ids).slice(-200)));
+}
+
+function notifyNative(alert) {
+  const ids = notifiedAlertIds();
+  const key = String(alert.id);
+  if (ids.has(key)) return;
+  ids.add(key);
+  saveNotifiedAlertIds(ids);
+
+  if (window.SearchSeatAndroid && typeof window.SearchSeatAndroid.notifySeatMatched === 'function') {
+    window.SearchSeatAndroid.notifySeatMatched(String(alert.id), alertTitle(alert), alertBody(alert), alert.reserve_url || '');
+  }
+}
+
+function mergeWatchAlert(alert) {
+  if (!alert || alert.id == null) return;
+  currentAlerts = [
+    alert,
+    ...currentAlerts.filter(item => Number(item.id) !== Number(alert.id))
+  ];
+}
+
+function stopWatchAlertStream() {
+  if (watchAlertReconnectTimer) {
+    clearTimeout(watchAlertReconnectTimer);
+    watchAlertReconnectTimer = null;
+  }
+  if (watchAlertSource) {
+    watchAlertSource.close();
+    watchAlertSource = null;
+  }
+}
+
+function scheduleWatchAlertStreamReconnect() {
+  if (watchAlertReconnectTimer || authPanel.classList.contains('hidden') === false) return;
+  watchAlertReconnectTimer = setTimeout(() => {
+    watchAlertReconnectTimer = null;
+    startWatchAlertStream();
+  }, WATCH_ALERT_POLL_INTERVAL_MS);
+}
+
+function startWatchAlertStream() {
+  if (!window.EventSource || watchAlertSource || authPanel.classList.contains('hidden') === false) return;
+  watchAlertSource = new EventSource('/api/watch-alerts/stream');
+  watchAlertSource.addEventListener('alert', async event => {
+    try {
+      const alert = JSON.parse(event.data);
+      mergeWatchAlert(alert);
+      notifyNative(alert);
+      showNextWatchAlert();
+      await loadWatchTasks();
+    } catch {
+    }
+  });
+  watchAlertSource.onerror = () => {
+    stopWatchAlertStream();
+    scheduleWatchAlertStreamReconnect();
+  };
+}
+
+function updateWebhookSummary() {
+  const url = (watchForm.webhook_url.value || '').trim();
+  const saved = watchForm.save_webhook.checked;
+  if (!url) {
+    webhookSummary.textContent = '未设置';
+    return;
+  }
+  webhookSummary.textContent = saved ? '已保存，会用于通知' : '仅本次任务使用';
+}
+
+function resolveStartWatch(value) {
+  startWatchModal.classList.add('hidden');
+  if (startWatchResolver) {
+    startWatchResolver(value);
+    startWatchResolver = null;
+  }
+}
+
+function confirmStartWatch() {
+  return new Promise(resolve => {
+    startWatchResolver = resolve;
+    startWatchModal.classList.remove('hidden');
+    startWatchContinue.focus();
+  });
+}
+
+async function checkWatchAlerts({ showPopup = true } = {}) {
+  if (authPanel.classList.contains('hidden') === false) return;
+  try {
+    const data = await api('/api/watch-alerts', { method: 'GET', headers: {} });
+    currentAlerts = data.alerts || [];
+    currentAlerts.forEach(notifyNative);
+    if (showPopup) showNextWatchAlert();
+  } catch {
+  }
+}
+
+function showNextWatchAlert() {
+  if (!watchAlertModal.classList.contains('hidden')) return;
+  const alert = currentAlerts.find(item => !dismissedAlertIds.has(Number(item.id)));
+  if (!alert) return;
+  activeWatchAlert = alert;
+  watchAlertMeta.textContent = `${alert.room_name || alert.room_id} · ${alert.day} ${alert.start_time}-${alert.end_time}`;
+  const matched = alert.matched_seats || [];
+  watchAlertSeats.textContent = matched.length
+    ? `命中座位：${matched.join(', ')}`
+    : '命中座位：-';
+  watchAlertModal.classList.remove('hidden');
+}
+
+function closeWatchAlert() {
+  watchAlertModal.classList.add('hidden');
+  activeWatchAlert = null;
+}
+
+async function ackWatchAlert(action) {
+  if (!activeWatchAlert) return;
+  const alert = activeWatchAlert;
+  await api(`/api/watch-alerts/${alert.id}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({ action })
+  });
+  currentAlerts = currentAlerts.filter(item => Number(item.id) !== Number(alert.id));
+  closeWatchAlert();
+  await loadWatchTasks();
+  if (action === 'reserve' && alert.reserve_url) {
+    location.href = alert.reserve_url;
+    return;
+  }
+  showNextWatchAlert();
 }
 
 function setTimeOptions() {
@@ -1256,6 +1711,8 @@ function fillDefaults(defaults) {
   queryForm.room_id.value = defaults.default_room_id;
   watchForm.webhook_url.value = defaults.default_webhook_url || '';
   watchForm.save_webhook.checked = Boolean(defaults.default_webhook_url);
+  webhookDetails.open = false;
+  updateWebhookSummary();
   officialIndexUrl = defaults.official_index_url || '';
   updateOfficialLink();
 }
@@ -1265,6 +1722,7 @@ function renderMe(data) {
     authPanel.classList.remove('hidden');
     appPanel.classList.add('hidden');
     topUser.classList.add('hidden');
+    stopWatchAlertStream();
     return;
   }
   authPanel.classList.add('hidden');
@@ -1278,6 +1736,7 @@ function renderMe(data) {
   } else {
     cxStatus.textContent = '未登录学习通';
   }
+  startWatchAlertStream();
   updateOfficialLink();
 }
 
@@ -1312,6 +1771,23 @@ function renderHistoryRows() {
       <button class="text-button danger" type="button" onclick="deleteHistory(${row.id})">删除</button>
     </span></td>
   </tr>`).join('') || '<tr><td colspan="9">暂无记录</td></tr>';
+  historyCards.innerHTML = visibleHistory.map(row => `<article class="mobile-card">
+    <div class="mobile-card-head">
+      <div>
+        <div class="mobile-title">${escapeHtml(row.room_name || row.room_id)}</div>
+        <div class="mobile-subtitle">${escapeHtml(row.day)} · ${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</div>
+      </div>
+      <div class="mobile-card-actions">
+      <button class="text-button" type="button" onclick="viewHistory(${row.id})">查看</button>
+      <button class="text-button danger" type="button" onclick="deleteHistory(${row.id})">删除</button>
+      </div>
+    </div>
+    <div class="mobile-meta">
+      <div class="mobile-meta-item"><span>可预约</span><b>${row.available_count}</b></div>
+      <div class="mobile-meta-item"><span>已占用</span><b>${row.occupied_count}</b></div>
+      <div class="mobile-meta-item"><span>连排</span><b>${row.pair_count}</b></div>
+    </div>
+  </article>`).join('') || '<div class="mobile-empty">暂无记录</div>';
   historySelectAll.checked = false;
   toggleHistoryBtn.classList.toggle('hidden', historyItems.length <= DEFAULT_HISTORY_LIMIT);
   toggleHistoryBtn.textContent = showAllHistory ? '收起' : `显示全部 ${historyItems.length} 条`;
@@ -1321,11 +1797,12 @@ async function loadWatchTasks() {
   const data = await api('/api/watch-tasks', { method: 'GET', headers: {} });
   watchItems = data.tasks || [];
   renderWatchRows();
+  await checkWatchAlerts();
 }
 
 function renderWatchRows() {
   const visibleWatch = showAllWatch ? watchItems : watchItems.slice(0, DEFAULT_HISTORY_LIMIT);
-  watchRows.innerHTML = visibleWatch.map(row => {
+  const watchRowHtml = visibleWatch.map(row => {
     const statusClass = row.status === 'matched' ? 'done' : row.status === 'running' ? '' : 'stop';
     const actions = row.status === 'running'
       ? `<button class="text-button danger" type="button" onclick="cancelWatchTask(${row.id})">取消</button>`
@@ -1339,6 +1816,9 @@ function renderWatchRows() {
     const matchedText = matched.length > 20
       ? `${matched.slice(0, 20).join(', ')} 等 ${matched.length} 个`
       : matched.join(', ');
+    const matchedCell = row.reserve_url && matched.length
+      ? `<a href="${escapeHtml(row.reserve_url)}" target="_blank" rel="noreferrer">${escapeHtml(matchedText)}</a>`
+      : escapeHtml(matchedText);
     return `<tr>
       <td data-label="创建时间">${escapeHtml(row.created_at)}</td>
       <td data-label="日期">${escapeHtml(row.day)}</td>
@@ -1347,10 +1827,45 @@ function renderWatchRows() {
       <td data-label="筛选">${escapeHtml(filters)}</td>
       <td data-label="状态"><span class="status-pill ${statusClass}">${escapeHtml(row.status_label)}</span>${error}</td>
       <td data-label="上次检查">${escapeHtml(row.last_checked_at || '')}</td>
-      <td data-label="命中座位">${escapeHtml(matchedText)}</td>
+      <td data-label="命中座位">${matchedCell}</td>
       <td data-label="操作"><span class="table-actions">${actions}</span></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9">暂无任务</td></tr>';
+  }).join('');
+  const watchCardHtml = visibleWatch.map(row => {
+    const statusClass = row.status === 'matched' ? 'done' : row.status === 'running' ? '' : 'stop';
+    const actions = row.status === 'running'
+      ? `<button class="text-button danger" type="button" onclick="cancelWatchTask(${row.id})">取消</button>`
+      : '';
+    const filters = [
+      row.ignore_no_power ? '无电源' : '',
+      row.ignore_sunny ? '太阳晒' : ''
+    ].filter(Boolean).join('，') || '无';
+    const matched = row.matched_seats || [];
+    const matchedText = matched.length > 20
+      ? `${matched.slice(0, 20).join(', ')} 等 ${matched.length} 个`
+      : matched.join(', ') || '-';
+    const matchedMeta = row.reserve_url && matched.length
+      ? `<a class="mobile-meta-item wide wrap" href="${escapeHtml(row.reserve_url)}" target="_blank" rel="noreferrer"><span>命中</span><b>${escapeHtml(matchedText)}</b></a>`
+      : `<div class="mobile-meta-item wide wrap"><span>命中</span><b>${escapeHtml(matchedText)}</b></div>`;
+    return `<article class="mobile-card">
+      <div class="mobile-card-head">
+        <div>
+          <div class="mobile-title">${escapeHtml(row.room_name || row.room_id)}</div>
+          <div class="mobile-subtitle">${escapeHtml(row.day)} · ${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</div>
+        </div>
+        <span class="status-pill ${statusClass}">${escapeHtml(row.status_label)}</span>
+      </div>
+      <div class="mobile-meta">
+        ${matchedMeta}
+        <div class="mobile-meta-item wide wrap"><span>筛选</span><b>${escapeHtml(filters)}</b></div>
+        <div class="mobile-meta-item wide wrap"><span>检查</span><b>${escapeHtml(row.last_checked_at || '-')}</b></div>
+      </div>
+      ${row.last_error ? `<div class="bad">${escapeHtml(row.last_error)}</div>` : ''}
+      ${actions ? `<div class="mobile-card-foot">${actions}</div>` : ''}
+    </article>`;
+  }).join('');
+  watchRows.innerHTML = watchRowHtml || '<tr><td colspan="9">暂无任务</td></tr>';
+  watchCards.innerHTML = watchCardHtml || '<div class="mobile-empty">暂无任务</div>';
   toggleWatchBtn.classList.toggle('hidden', watchItems.length <= DEFAULT_HISTORY_LIMIT);
   toggleWatchBtn.textContent = showAllWatch ? '收起' : `显示全部 ${watchItems.length} 条`;
 }
@@ -1425,7 +1940,9 @@ async function deleteHistory(id) {
 }
 
 function selectedHistoryIds() {
-  return Array.from(document.querySelectorAll('.history-check:checked')).map(item => Number(item.value));
+  return Array.from(new Set(
+    Array.from(document.querySelectorAll('.history-check:checked')).map(item => Number(item.value))
+  ));
 }
 
 async function deleteSelectedHistory() {
@@ -1525,6 +2042,10 @@ refreshWatchBtn.addEventListener('click', async () => {
     setMessage(watchMessage, error.message);
   }
 });
+watchForm.webhook_url.addEventListener('input', updateWebhookSummary);
+watchForm.save_webhook.addEventListener('change', updateWebhookSummary);
+startWatchCancel.addEventListener('click', () => resolveStartWatch(false));
+startWatchContinue.addEventListener('click', () => resolveStartWatch(true));
 
 queryForm.addEventListener('input', updateOfficialLink);
 queryForm.addEventListener('change', event => {
@@ -1563,6 +2084,11 @@ watchForm.addEventListener('submit', async event => {
     setMessage(watchMessage, '结束时间必须晚于开始时间');
     return;
   }
+  const confirmed = await confirmStartWatch();
+  if (!confirmed) {
+    setMessage(watchMessage, '');
+    return;
+  }
   const queryPayload = Object.fromEntries(new FormData(queryForm).entries());
   const watchPayload = Object.fromEntries(new FormData(watchForm).entries());
   const payload = { ...queryPayload, ...watchPayload };
@@ -1598,12 +2124,38 @@ historyModal.addEventListener('click', event => {
   }
 });
 
+watchAlertCancel.addEventListener('click', () => {
+  if (activeWatchAlert) dismissedAlertIds.add(Number(activeWatchAlert.id));
+  closeWatchAlert();
+  showNextWatchAlert();
+});
+
+watchAlertReserve.addEventListener('click', async () => {
+  try {
+    await ackWatchAlert('reserve');
+  } catch (error) {
+    setMessage(watchMessage, error.message);
+  }
+});
+
+watchAlertConfirm.addEventListener('click', async () => {
+  try {
+    await ackWatchAlert('confirm');
+  } catch (error) {
+    setMessage(watchMessage, error.message);
+  }
+});
+
 setTimeOptions();
 loadMe().then(async data => {
   if (!authPanel.classList.contains('hidden')) return;
   await loadHistory();
   await loadWatchTasks();
 }).catch(() => {});
+setInterval(() => {
+  if (!authPanel.classList.contains('hidden')) return;
+  checkWatchAlerts();
+}, WATCH_ALERT_POLL_INTERVAL_MS);
 </script>
 </body>
 </html>

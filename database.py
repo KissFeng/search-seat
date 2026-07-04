@@ -129,6 +129,8 @@ def init_db() -> None:
                     interval_seconds INT UNSIGNED NOT NULL DEFAULT 60,
                     status VARCHAR(20) NOT NULL DEFAULT 'running',
                     matched_seats_json TEXT NULL,
+                    reminder_ack_at DATETIME NULL,
+                    reminder_action VARCHAR(20) NULL,
                     last_checked_at DATETIME NULL,
                     next_check_at DATETIME NULL,
                     expires_at DATETIME NOT NULL,
@@ -144,6 +146,8 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            ensure_column(cursor, "seat_watch_tasks", "reminder_ack_at", "DATETIME NULL")
+            ensure_column(cursor, "seat_watch_tasks", "reminder_action", "VARCHAR(20) NULL")
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:
