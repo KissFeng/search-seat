@@ -1359,6 +1359,73 @@ INDEX_HTML = r"""
     .start-watch-panel { width: min(520px, 100%); }
     .start-watch-text { margin: 0; color: #44534c; line-height: 1.68; font-size: 14px; }
     .start-watch-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .consent-panel { width: min(560px, 100%); border-top: 5px solid var(--lamp); }
+    .consent-copy { margin: 0 0 14px; color: #44534c; line-height: 1.68; font-size: 14px; }
+    .consent-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .consent-list li { border-left: 3px solid var(--line); background: #f8fbf6; padding: 10px 12px; color: #526059; font-size: 13px; line-height: 1.55; }
+    .consent-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    #appPanel { padding-bottom: 92px; }
+    .app-view.hidden { display: none !important; }
+    .view-empty {
+      display: grid;
+      place-items: center;
+      min-height: 260px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      background: #fbfdf9;
+      color: var(--muted);
+      text-align: center;
+      padding: 24px;
+    }
+    .view-empty b { display: block; margin-bottom: 6px; color: var(--shelf-dark); font-size: 16px; }
+    .app-dock {
+      position: fixed;
+      left: 50%;
+      bottom: max(18px, env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      z-index: 35;
+      width: min(520px, calc(100vw - 32px));
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 4px;
+      padding: 6px;
+      border: 1px solid rgba(203, 216, 208, .92);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .94);
+      box-shadow: 0 18px 52px rgba(22, 40, 34, .16);
+      backdrop-filter: blur(18px);
+    }
+    .dock-item {
+      min-height: 54px;
+      padding: 6px 4px;
+      border-radius: 6px;
+      background: transparent;
+      color: #59665f;
+      box-shadow: none;
+      display: grid;
+      place-items: center;
+      gap: 2px;
+      font-size: 12px;
+      font-weight: 780;
+    }
+    .dock-item:hover { transform: none; box-shadow: none; background: #f3f8f2; color: var(--shelf-dark); }
+    .dock-item.active { background: #edf7f0; color: var(--shelf); }
+    .dock-icon {
+      display: grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      color: currentColor;
+    }
+    .dock-icon svg {
+      width: 21px;
+      height: 21px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
         scroll-behavior: auto !important;
@@ -1429,6 +1496,21 @@ INDEX_HTML = r"""
       .webhook-details summary { align-items: flex-start; }
       .webhook-summary { max-width: 48vw; }
       .start-watch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .consent-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #appPanel { padding-bottom: calc(86px + env(safe-area-inset-bottom)); }
+      .app-dock {
+        left: 0;
+        right: 0;
+        bottom: 0;
+        transform: none;
+        width: 100%;
+        border-left: 0;
+        border-right: 0;
+        border-bottom: 0;
+        border-radius: 8px 8px 0 0;
+        padding: 6px 8px max(6px, env(safe-area-inset-bottom));
+      }
+      .dock-item { min-height: 50px; }
     }
   </style>
 </head>
@@ -1444,23 +1526,6 @@ INDEX_HTML = r"""
   <main>
     <section id="authPanel" class="auth">
       <h2>登录座位雷达</h2>
-      <div class="disclaimer compact">
-        <h3>使用前说明</h3>
-        <div class="disclaimer-grid">
-          <div class="disclaimer-item">
-            <b>账号安全</b>
-            <span>学习通账号仅用于查询座位和跳转预约页面，不会对外泄漏。</span>
-          </div>
-          <div class="disclaimer-item">
-            <b>使用范围</b>
-            <span>本项目仅供学习研究使用，请遵守学校和学习通相关规则。</span>
-          </div>
-          <div class="disclaimer-item">
-            <b>问题反馈</b>
-            <span>如有问题可联系 <a href="https://wpa.qq.com/msgrd?v=3&uin=26699525&site=qq&menu=yes" target="_blank" rel="noreferrer">Power</a>。</span>
-          </div>
-        </div>
-      </div>
       <form id="authForm">
         <label>学习通账号
           <input name="account" autocomplete="username" required>
@@ -1476,7 +1541,7 @@ INDEX_HTML = r"""
     </section>
 
     <div id="appPanel" class="hidden">
-      <section>
+      <section id="accountSection">
         <div class="statusbar">
           <div>
             <h2>学习通账号</h2>
@@ -1486,25 +1551,7 @@ INDEX_HTML = r"""
         </div>
       </section>
 
-      <section class="disclaimer">
-        <h3>免责声明</h3>
-        <div class="disclaimer-grid">
-          <div class="disclaimer-item">
-            <b>账号安全</b>
-            <span>账号信息仅用于本机当前服务查询座位、预约跳转和必要的登录状态维护，不会主动泄漏或分享给第三方。</span>
-          </div>
-          <div class="disclaimer-item">
-            <b>学习研究</b>
-            <span>本项目仅供学习研究使用，请勿用于违规抢占资源或影响他人正常使用。</span>
-          </div>
-          <div class="disclaimer-item">
-            <b>联系 Power</b>
-            <span>遇到问题可通过 QQ <a href="https://wpa.qq.com/msgrd?v=3&uin=26699525&site=qq&menu=yes" target="_blank" rel="noreferrer">26699525</a> 联系。</span>
-          </div>
-        </div>
-      </section>
-
-      <section>
+      <section id="querySection" class="app-view" data-app-view>
         <h2>座位查询</h2>
         <form id="queryForm">
           <label>房间
@@ -1532,28 +1579,36 @@ INDEX_HTML = r"""
         <div class="message" id="queryMessage"></div>
       </section>
 
-      <section id="resultsPanel" class="hidden">
-        <div class="stats">
-          <div class="stat">总座位 <b id="statTotal">0</b></div>
-          <div class="stat">可预约 <b id="statAvailable">0</b></div>
-          <div class="stat">已占用 <b id="statOccupied">0</b></div>
-          <div class="stat">已过滤 <b id="statFiltered">0</b></div>
-          <div class="stat">连排座 <b id="statPairs">0</b></div>
+      <section id="resultsPanel" class="app-view hidden" data-app-view>
+        <div id="resultsEmpty" class="view-empty">
+          <div>
+            <b>还没有查询结果</b>
+            <span>先在“查询”页选择房间和时段，完成后会自动切到这里。</span>
+          </div>
         </div>
-        <div class="tabs">
-          <button class="tab active" type="button" data-tab="seats">可预约座位</button>
-          <button class="tab" type="button" data-tab="pairs">双人连排</button>
+        <div id="resultsContent" class="hidden">
+          <div class="stats">
+            <div class="stat">总座位 <b id="statTotal">0</b></div>
+            <div class="stat">可预约 <b id="statAvailable">0</b></div>
+            <div class="stat">已占用 <b id="statOccupied">0</b></div>
+            <div class="stat">已过滤 <b id="statFiltered">0</b></div>
+            <div class="stat">连排座 <b id="statPairs">0</b></div>
+          </div>
+          <div class="tabs">
+            <button class="tab active" type="button" data-tab="seats">可预约座位</button>
+            <button class="tab" type="button" data-tab="pairs">双人连排</button>
+          </div>
+          <div id="seatGrid" class="seat-grid"></div>
+          <div id="pairGrid" class="seat-grid pair-grid hidden"></div>
         </div>
-        <div id="seatGrid" class="seat-grid"></div>
-        <div id="pairGrid" class="seat-grid pair-grid hidden"></div>
       </section>
 
-      <section>
+      <section id="watchSection" class="app-view hidden" data-app-view>
         <div class="section-head">
           <h2>蹲座提醒</h2>
           <div class="section-actions">
             <button class="text-button" id="refreshWatchBtn" type="button">刷新</button>
-            <button class="text-button" id="toggleWatchBtn" type="button">显示全部</button>
+            <button class="text-button" id="toggleWatchBtn" type="button">查看历史</button>
           </div>
         </div>
         <form id="watchForm">
@@ -1597,32 +1652,83 @@ INDEX_HTML = r"""
         <div class="mobile-list" id="watchCards"></div>
       </section>
 
-      <section>
+      <section id="historySection" class="app-view hidden" data-app-view>
         <div class="section-head">
-          <h2>查询历史</h2>
+          <h2>历史</h2>
           <div class="section-actions">
             <button class="text-button" id="toggleHistoryBtn" type="button">显示全部</button>
             <button class="text-button danger" id="deleteSelectedHistoryBtn" type="button">删除选中</button>
           </div>
         </div>
-        <table class="responsive-table">
-          <thead>
-            <tr>
-              <th class="check-cell"><input id="historySelectAll" type="checkbox"></th>
-              <th>时间</th>
-              <th>日期</th>
-              <th>时段</th>
-              <th>房间</th>
-              <th>可预约</th>
-              <th>已占用</th>
-              <th>连排</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="historyRows"></tbody>
-        </table>
-        <div class="mobile-list" id="historyCards"></div>
+        <div class="tabs">
+          <button class="tab active" type="button" data-history-kind="query">查询历史</button>
+          <button class="tab" type="button" data-history-kind="watch">蹲座历史</button>
+        </div>
+        <div id="queryHistoryPanel">
+          <table class="responsive-table">
+            <thead>
+              <tr>
+                <th class="check-cell"><input id="historySelectAll" type="checkbox"></th>
+                <th>时间</th>
+                <th>日期</th>
+                <th>时段</th>
+                <th>房间</th>
+                <th>可预约</th>
+                <th>已占用</th>
+                <th>连排</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="historyRows"></tbody>
+          </table>
+          <div class="mobile-list" id="historyCards"></div>
+        </div>
+        <div id="watchHistoryPanel" class="hidden">
+          <table class="responsive-table">
+            <thead>
+              <tr>
+                <th>创建时间</th>
+                <th>日期</th>
+                <th>时段</th>
+                <th>房间</th>
+                <th>筛选</th>
+                <th>状态</th>
+                <th>上次检查</th>
+                <th>命中座位</th>
+              </tr>
+            </thead>
+            <tbody id="watchHistoryRows"></tbody>
+          </table>
+          <div class="mobile-list" id="watchHistoryCards"></div>
+        </div>
       </section>
+
+      <nav class="app-dock" aria-label="主导航">
+        <button class="dock-item active" type="button" data-dock-target="querySection" aria-label="座位查询">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m16.5 16.5 4 4"></path></svg>
+          </span>
+          <span>查询</span>
+        </button>
+        <button class="dock-item" type="button" data-dock-target="resultsPanel" aria-label="查询结果">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 5h16"></path><path d="M4 12h16"></path><path d="M4 19h16"></path><path d="M8 5v14"></path></svg>
+          </span>
+          <span>结果</span>
+        </button>
+        <button class="dock-item" type="button" data-dock-target="watchSection" aria-label="蹲座提醒">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
+          </span>
+          <span>蹲座</span>
+        </button>
+        <button class="dock-item" type="button" data-dock-target="historySection" aria-label="查询历史">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg>
+          </span>
+          <span>历史</span>
+        </button>
+      </nav>
     </div>
   </main>
 
@@ -1689,6 +1795,29 @@ INDEX_HTML = r"""
     </div>
   </div>
 
+  <div id="disclaimerModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-panel consent-panel">
+      <div class="modal-head">
+        <div>
+          <h2>登录前确认</h2>
+          <div class="muted">同意后才会提交学习通账号密码。</div>
+        </div>
+      </div>
+      <p class="consent-copy">
+        本工具只用于查询图书馆座位、跳转预约页面和维护必要登录状态。请确认你理解并接受以下说明。
+      </p>
+      <ul class="consent-list">
+        <li>账号信息仅用于当前服务请求学习通座位接口，不会主动泄漏或分享给第三方。</li>
+        <li>本项目仅供学习研究使用，请遵守学校和学习通相关规则，不要影响他人正常使用。</li>
+        <li>浏览器跳转到官方预约页时，仍以学习通页面和学校规则为准。</li>
+      </ul>
+      <div class="consent-actions">
+        <button class="ghost" id="disclaimerCancel" type="button">不同意</button>
+        <button id="disclaimerAccept" type="button">同意并登录</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const authPanel = document.querySelector('#authPanel');
 const appPanel = document.querySelector('#appPanel');
@@ -1704,14 +1833,20 @@ const cxStatus = document.querySelector('#cxStatus');
 const officialLink = document.querySelector('#officialLink');
 const historyRows = document.querySelector('#historyRows');
 const watchRows = document.querySelector('#watchRows');
+const watchHistoryRows = document.querySelector('#watchHistoryRows');
 const historyCards = document.querySelector('#historyCards');
 const watchCards = document.querySelector('#watchCards');
+const watchHistoryCards = document.querySelector('#watchHistoryCards');
+const queryHistoryPanel = document.querySelector('#queryHistoryPanel');
+const watchHistoryPanel = document.querySelector('#watchHistoryPanel');
 const historySelectAll = document.querySelector('#historySelectAll');
 const deleteSelectedHistoryBtn = document.querySelector('#deleteSelectedHistoryBtn');
 const refreshWatchBtn = document.querySelector('#refreshWatchBtn');
 const toggleHistoryBtn = document.querySelector('#toggleHistoryBtn');
 const toggleWatchBtn = document.querySelector('#toggleWatchBtn');
 const resultsPanel = document.querySelector('#resultsPanel');
+const resultsEmpty = document.querySelector('#resultsEmpty');
+const resultsContent = document.querySelector('#resultsContent');
 const seatGrid = document.querySelector('#seatGrid');
 const pairGrid = document.querySelector('#pairGrid');
 const historyModal = document.querySelector('#historyModal');
@@ -1733,6 +1868,11 @@ const webhookSummary = document.querySelector('#webhookSummary');
 const startWatchModal = document.querySelector('#startWatchModal');
 const startWatchCancel = document.querySelector('#startWatchCancel');
 const startWatchContinue = document.querySelector('#startWatchContinue');
+const disclaimerModal = document.querySelector('#disclaimerModal');
+const disclaimerCancel = document.querySelector('#disclaimerCancel');
+const disclaimerAccept = document.querySelector('#disclaimerAccept');
+const dockItems = Array.from(document.querySelectorAll('.dock-item'));
+const appViews = Array.from(document.querySelectorAll('[data-app-view]'));
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
 const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
@@ -1741,11 +1881,12 @@ let officialIndexUrl = '';
 let historyItems = [];
 let watchItems = [];
 let showAllHistory = false;
-let showAllWatch = false;
+let activeHistoryKind = 'query';
 let activeWatchAlert = null;
 let currentAlerts = [];
 const dismissedAlertIds = new Set();
 let startWatchResolver = null;
+let disclaimerResolver = null;
 let watchAlertSource = null;
 let watchAlertReconnectTimer = null;
 
@@ -1762,6 +1903,38 @@ function escapeHtml(value) {
 function setMessage(node, text, ok = false) {
   node.textContent = text || '';
   node.className = `message ${ok ? 'ok' : text ? 'bad' : ''}`;
+}
+
+function setActiveDock(targetId) {
+  dockItems.forEach(item => {
+    item.classList.toggle('active', item.dataset.dockTarget === targetId);
+  });
+}
+
+function switchAppView(targetId) {
+  const target = document.querySelector(`#${targetId}`);
+  if (!target) return;
+  appViews.forEach(view => {
+    view.classList.toggle('hidden', view.id !== targetId);
+  });
+  setActiveDock(targetId);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function resolveDisclaimer(value) {
+  disclaimerModal.classList.add('hidden');
+  if (disclaimerResolver) {
+    disclaimerResolver(value);
+    disclaimerResolver = null;
+  }
+}
+
+function confirmDisclaimer() {
+  return new Promise(resolve => {
+    disclaimerResolver = resolve;
+    disclaimerModal.classList.remove('hidden');
+    disclaimerAccept.focus();
+  });
 }
 
 async function api(path, options = {}) {
@@ -1988,6 +2161,7 @@ function renderMe(data) {
   }
   startWatchAlertStream();
   updateOfficialLink();
+  switchAppView('querySection');
 }
 
 function updateOfficialLink() {
@@ -2039,22 +2213,26 @@ function renderHistoryRows() {
     </div>
   </article>`).join('') || '<div class="mobile-empty">暂无记录</div>';
   historySelectAll.checked = false;
-  toggleHistoryBtn.classList.toggle('hidden', historyItems.length <= DEFAULT_HISTORY_LIMIT);
-  toggleHistoryBtn.textContent = showAllHistory ? '收起' : `显示全部 ${historyItems.length} 条`;
+  renderHistoryControls();
 }
 
 async function loadWatchTasks() {
   const data = await api('/api/watch-tasks', { method: 'GET', headers: {} });
   watchItems = data.tasks || [];
   renderWatchRows();
+  renderWatchHistoryRows();
   await checkWatchAlerts();
 }
 
-function renderWatchRows() {
-  const visibleWatch = showAllWatch ? watchItems : watchItems.slice(0, DEFAULT_HISTORY_LIMIT);
-  const watchRowHtml = visibleWatch.map(row => {
+function watchPageItems() {
+  const running = watchItems.filter(row => row.status === 'running');
+  return running.length ? running : watchItems.slice(0, 1);
+}
+
+function renderWatchTableRows(items, includeActions = true) {
+  return items.map(row => {
     const statusClass = row.status === 'matched' ? 'done' : row.status === 'running' ? '' : 'stop';
-    const actions = row.status === 'running'
+    const actions = includeActions && row.status === 'running'
       ? `<button class="text-button danger" type="button" onclick="cancelWatchTask(${row.id})">取消</button>`
       : '';
     const error = row.last_error ? `<div class="bad">${escapeHtml(row.last_error)}</div>` : '';
@@ -2078,12 +2256,15 @@ function renderWatchRows() {
       <td data-label="状态"><span class="status-pill ${statusClass}">${escapeHtml(row.status_label)}</span>${error}</td>
       <td data-label="上次检查">${escapeHtml(row.last_checked_at || '')}</td>
       <td data-label="命中座位">${matchedCell}</td>
-      <td data-label="操作"><span class="table-actions">${actions}</span></td>
+      ${includeActions ? `<td data-label="操作"><span class="table-actions">${actions}</span></td>` : ''}
     </tr>`;
   }).join('');
-  const watchCardHtml = visibleWatch.map(row => {
+}
+
+function renderWatchCardRows(items, includeActions = true) {
+  return items.map(row => {
     const statusClass = row.status === 'matched' ? 'done' : row.status === 'running' ? '' : 'stop';
-    const actions = row.status === 'running'
+    const actions = includeActions && row.status === 'running'
       ? `<button class="text-button danger" type="button" onclick="cancelWatchTask(${row.id})">取消</button>`
       : '';
     const filters = [
@@ -2111,18 +2292,49 @@ function renderWatchRows() {
         <div class="mobile-meta-item wide wrap"><span>检查</span><b>${escapeHtml(row.last_checked_at || '-')}</b></div>
       </div>
       ${row.last_error ? `<div class="bad">${escapeHtml(row.last_error)}</div>` : ''}
-      ${actions ? `<div class="mobile-card-foot">${actions}</div>` : ''}
+      ${includeActions && actions ? `<div class="mobile-card-foot">${actions}</div>` : ''}
     </article>`;
   }).join('');
-  watchRows.innerHTML = watchRowHtml || '<tr><td colspan="9">暂无任务</td></tr>';
-  watchCards.innerHTML = watchCardHtml || '<div class="mobile-empty">暂无任务</div>';
-  toggleWatchBtn.classList.toggle('hidden', watchItems.length <= DEFAULT_HISTORY_LIMIT);
-  toggleWatchBtn.textContent = showAllWatch ? '收起' : `显示全部 ${watchItems.length} 条`;
+}
+
+function renderWatchRows() {
+  const visibleWatch = watchPageItems();
+  watchRows.innerHTML = renderWatchTableRows(visibleWatch, true) || '<tr><td colspan="9">暂无任务</td></tr>';
+  watchCards.innerHTML = renderWatchCardRows(visibleWatch, true) || '<div class="mobile-empty">暂无任务</div>';
+  toggleWatchBtn.classList.toggle('hidden', watchItems.length === 0);
+  toggleWatchBtn.textContent = '查看历史';
+}
+
+function renderWatchHistoryRows() {
+  const visibleWatch = showAllHistory ? watchItems : watchItems.slice(0, DEFAULT_HISTORY_LIMIT);
+  watchHistoryRows.innerHTML = renderWatchTableRows(visibleWatch, false) || '<tr><td colspan="8">暂无蹲座历史</td></tr>';
+  watchHistoryCards.innerHTML = renderWatchCardRows(visibleWatch, false) || '<div class="mobile-empty">暂无蹲座历史</div>';
+  renderHistoryControls();
+}
+
+function renderHistoryControls() {
+  const total = activeHistoryKind === 'watch' ? watchItems.length : historyItems.length;
+  toggleHistoryBtn.classList.toggle('hidden', total <= DEFAULT_HISTORY_LIMIT);
+  toggleHistoryBtn.textContent = showAllHistory ? '收起' : `显示全部 ${total} 条`;
+  deleteSelectedHistoryBtn.classList.toggle('hidden', activeHistoryKind !== 'query');
+}
+
+function setHistoryKind(kind) {
+  activeHistoryKind = kind;
+  showAllHistory = false;
+  document.querySelectorAll('[data-history-kind]').forEach(button => {
+    button.classList.toggle('active', button.dataset.historyKind === kind);
+  });
+  queryHistoryPanel.classList.toggle('hidden', kind !== 'query');
+  watchHistoryPanel.classList.toggle('hidden', kind !== 'watch');
+  renderHistoryRows();
+  renderWatchHistoryRows();
 }
 
 function renderResults(result) {
   latestResult = result;
-  resultsPanel.classList.remove('hidden');
+  resultsEmpty.classList.add('hidden');
+  resultsContent.classList.remove('hidden');
   document.querySelector('#statTotal').textContent = result.summary.total;
   document.querySelector('#statAvailable').textContent = result.summary.available;
   document.querySelector('#statOccupied').textContent = result.summary.occupied;
@@ -2130,6 +2342,7 @@ function renderResults(result) {
   document.querySelector('#statPairs').textContent = result.summary.pairs;
   renderSeatLists(result, seatGrid, pairGrid);
   setTab('seats');
+  switchAppView('resultsPanel');
 }
 
 function renderSeatLists(result, seatTarget, pairTarget) {
@@ -2226,7 +2439,7 @@ async function cancelWatchTask(id) {
 }
 
 function setTab(tab) {
-  document.querySelectorAll('.tab').forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
+  document.querySelectorAll('[data-tab]').forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
   seatGrid.classList.toggle('hidden', tab !== 'seats');
   pairGrid.classList.toggle('hidden', tab !== 'pairs');
 }
@@ -2241,8 +2454,13 @@ function setModalTab(tab) {
 
 authForm.addEventListener('submit', async event => {
   event.preventDefault();
-  setMessage(authMessage, '正在登录学习通...');
   const payload = Object.fromEntries(new FormData(authForm).entries());
+  const accepted = await confirmDisclaimer();
+  if (!accepted) {
+    setMessage(authMessage, '需要同意使用说明后才能登录');
+    return;
+  }
+  setMessage(authMessage, '正在登录学习通...');
   try {
     await api('/api/chaoxing/login', {
       method: 'POST',
@@ -2278,11 +2496,21 @@ historyRows.addEventListener('change', event => {
 deleteSelectedHistoryBtn.addEventListener('click', deleteSelectedHistory);
 toggleHistoryBtn.addEventListener('click', () => {
   showAllHistory = !showAllHistory;
-  renderHistoryRows();
+  if (activeHistoryKind === 'watch') {
+    renderWatchHistoryRows();
+  } else {
+    renderHistoryRows();
+  }
 });
 toggleWatchBtn.addEventListener('click', () => {
-  showAllWatch = !showAllWatch;
-  renderWatchRows();
+  setHistoryKind('watch');
+  switchAppView('historySection');
+});
+dockItems.forEach(item => {
+  item.addEventListener('click', () => switchAppView(item.dataset.dockTarget));
+});
+document.querySelectorAll('[data-history-kind]').forEach(button => {
+  button.addEventListener('click', () => setHistoryKind(button.dataset.historyKind));
 });
 refreshWatchBtn.addEventListener('click', async () => {
   try {
@@ -2296,6 +2524,8 @@ watchForm.webhook_url.addEventListener('input', updateWebhookSummary);
 watchForm.save_webhook.addEventListener('change', updateWebhookSummary);
 startWatchCancel.addEventListener('click', () => resolveStartWatch(false));
 startWatchContinue.addEventListener('click', () => resolveStartWatch(true));
+disclaimerCancel.addEventListener('click', () => resolveDisclaimer(false));
+disclaimerAccept.addEventListener('click', () => resolveDisclaimer(true));
 
 queryForm.addEventListener('input', updateOfficialLink);
 queryForm.addEventListener('change', event => {
