@@ -22,6 +22,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.VibrationEffect;
+import android.os.VibrationAttributes;
+import android.os.Vibrator;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -60,7 +63,8 @@ public class MainActivity extends Activity {
     private static final String NOTIFICATION_CHANNEL_ID = "seat_match_alerts_v2";
     private static final int NOTIFICATION_PERMISSION_REQUEST = 42;
     private static final long ALERT_POLL_INTERVAL_MS = 5000L;
-    private static final long[] NOTIFICATION_VIBRATION_PATTERN = new long[]{0, 300, 160, 300};
+    private static final long[] NOTIFICATION_VIBRATION_PATTERN = new long[]{0, 260, 130, 260};
+    private static final int[] NOTIFICATION_VIBRATION_AMPLITUDES = new int[]{0, 255, 0, 255};
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -440,6 +444,44 @@ public class MainActivity extends Activity {
                 .setDefaults(Notification.DEFAULT_SOUND | Notification.DEFAULT_VIBRATE)
                 .setVibrate(NOTIFICATION_VIBRATION_PATTERN);
         manager.notify(Math.abs((title + body + targetUrl).hashCode()), builder.build());
+        vibrateForSeatAlert();
+    }
+
+    private void vibrateForSeatAlert() {
+        Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            return;
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                VibrationEffect effect = VibrationEffect.createWaveform(
+                        NOTIFICATION_VIBRATION_PATTERN,
+                        NOTIFICATION_VIBRATION_AMPLITUDES,
+                        -1
+                );
+                VibrationAttributes attributes = new VibrationAttributes.Builder()
+                        .setUsage(VibrationAttributes.USAGE_ALARM)
+                        .build();
+                vibrator.vibrate(effect, attributes);
+                return;
+            }
+
+            AudioAttributes attributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                VibrationEffect effect = VibrationEffect.createWaveform(
+                        NOTIFICATION_VIBRATION_PATTERN,
+                        NOTIFICATION_VIBRATION_AMPLITUDES,
+                        -1
+                );
+                vibrator.vibrate(effect, attributes);
+            } else {
+                vibrator.vibrate(NOTIFICATION_VIBRATION_PATTERN, -1, attributes);
+            }
+        } catch (RuntimeException ignored) {
+        }
     }
 
     private void flushCookies() {

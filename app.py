@@ -1037,7 +1037,7 @@ INDEX_HTML = r"""
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Search Seat</title>
+  <title>工职大 Search Seat</title>
   <style>
     :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -1156,7 +1156,8 @@ INDEX_HTML = r"""
       .mobile-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #fff; }
       .mobile-card-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
       .mobile-card-actions { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
-      .mobile-title { font-size: 15px; font-weight: 700; color: #172033; }
+      .mobile-title { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 15px; font-weight: 700; color: #172033; }
+      .mobile-title small { color: #64748b; font-size: 11px; font-weight: 500; }
       .mobile-subtitle { margin-top: 3px; color: #64748b; font-size: 12px; }
       .mobile-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
       .mobile-meta-item { border-radius: 8px; background: #f8fafc; padding: 8px; min-width: 0; }
@@ -1184,7 +1185,7 @@ INDEX_HTML = r"""
 </head>
 <body>
   <header>
-    <h1>Search Seat</h1>
+    <h1>工职大 Search Seat</h1>
     <div id="topUser" class="row hidden">
       <span class="muted" id="username"></span>
       <button class="ghost" id="logoutBtn" type="button">退出</button>
@@ -1732,7 +1733,7 @@ function renderMe(data) {
   fillDefaults(data.defaults);
   if (data.chaoxing.bound) {
     const validText = data.chaoxing.session_valid ? '已保存 Cookie' : 'Cookie 可能已失效';
-    cxStatus.innerHTML = `${escapeHtml(data.chaoxing.account)} · ${validText} · ${escapeHtml(data.chaoxing.cookies_updated_at || '')}`;
+    cxStatus.innerHTML = `${validText} · ${escapeHtml(data.chaoxing.cookies_updated_at || '')}`;
   } else {
     cxStatus.textContent = '未登录学习通';
   }
@@ -1850,7 +1851,7 @@ function renderWatchRows() {
     return `<article class="mobile-card">
       <div class="mobile-card-head">
         <div>
-          <div class="mobile-title">${escapeHtml(row.room_name || row.room_id)}</div>
+          <div class="mobile-title">${escapeHtml(row.room_name || row.room_id)}<small>开启：${escapeHtml(row.created_at || '-')}</small></div>
           <div class="mobile-subtitle">${escapeHtml(row.day)} · ${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</div>
         </div>
         <span class="status-pill ${statusClass}">${escapeHtml(row.status_label)}</span>
