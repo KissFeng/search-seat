@@ -3,6 +3,7 @@
 
 import base64
 import json
+import time
 from urllib.parse import urlencode, unquote
 
 import requests
@@ -10,6 +11,9 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
 import config
+
+
+CHAOXING_CURRICULUM_URL = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
 
 
 def encrypt_by_aes(message: str, key: str = config.CHAOXING_LOGIN_TRANSFER_KEY) -> str:
@@ -32,6 +36,36 @@ def parse_cookie(raw: str) -> dict:
 
 def build_base_headers() -> dict:
     return {"User-Agent": config.USER_AGENT}
+
+
+def build_curriculum_headers() -> dict:
+    return {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://kb.chaoxing.com/res/pc/curriculum/schedule.html",
+    }
+
+
+def parse_curriculum_user_name(result: dict) -> str:
+    if not result.get("result"):
+        raise RuntimeError(result.get("msg") or "课程接口返回失败")
+    user_name = result.get("data", {}).get("curriculum", {}).get("userName")
+    user_name = str(user_name or "").strip()
+    if not user_name:
+        raise RuntimeError("课程接口没有返回用户姓名")
+    return user_name
+
+
+def fetch_curriculum_user_name(session: requests.Session) -> str:
+    response = session.get(
+        CHAOXING_CURRICULUM_URL,
+        headers=build_curriculum_headers(),
+        params={"curTime": int(time.time() * 1000)},
+        timeout=12,
+    )
+    response.raise_for_status()
+    return parse_curriculum_user_name(response.json())
 
 
 def build_select_url(room_id: str, fid_enc: str, day: str) -> str:
@@ -98,6 +132,17 @@ def session_from_cookie_json(cookies_json: str) -> requests.Session:
             kwargs["domain"] = item["domain"]
         session.cookies.set(item["name"], item["value"], **kwargs)
     return session
+
+
+def cookie_json_to_header(cookies_json: str) -> str:
+    pairs = []
+    for item in json.loads(cookies_json or "[]"):
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "")
+        if not name:
+            continue
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
 
 
 def session_from_cookie_header(cookie_raw: str) -> requests.Session:

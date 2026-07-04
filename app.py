@@ -4,6 +4,7 @@
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
+import hmac
 import queue
 import threading
 import time
@@ -151,6 +152,31 @@ def validate_watch_interval(value) -> int:
     return interval
 
 
+def first_query_value(params: dict, name: str, default: str) -> str:
+    value = params.get(name, default)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return value
+
+
+def admin_pagination(params: dict) -> dict:
+    try:
+        page = int(first_query_value(params, "page", "1"))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(first_query_value(params, "page_size", "10"))
+    except (TypeError, ValueError):
+        page_size = 10
+    page = max(1, page)
+    page_size = min(50, max(1, page_size))
+    return {
+        "page": page,
+        "page_size": page_size,
+        "offset": (page - 1) * page_size,
+    }
+
+
 def build_seat_response(room: dict, day: str, start_time: str, end_time: str, result: dict, payload: dict) -> dict:
     room_id = str(room["room_id"])
     seat_min, seat_max, seat_width = room_seat_config(room)
@@ -194,7 +220,8 @@ def get_chaoxing_session(user_id: int):
     return database.fetch_one(
         """
         SELECT id, user_id, cx_account, cookies_json, session_valid, last_error,
-               cookies_updated_at, last_login_at
+               cookies_updated_at, last_login_at, cx_user_name,
+               curriculum_synced_at, curriculum_sync_error
         FROM chaoxing_sessions
         WHERE user_id = %s
         """,
@@ -265,6 +292,144 @@ def update_chaoxing_cookies(user_id: int, cookies_json: str) -> None:
         """,
         (cookies_json, user_id),
     )
+
+
+def save_chaoxing_profile_success(user_id: int, user_name: str) -> None:
+    database.execute(
+        """
+        UPDATE chaoxing_sessions
+        SET cx_user_name = %s,
+            curriculum_synced_at = NOW(),
+            curriculum_sync_error = NULL
+        WHERE user_id = %s
+        """,
+        (user_name[:128], user_id),
+    )
+
+
+def save_chaoxing_profile_error(user_id: int, error: str) -> None:
+    database.execute(
+        """
+        UPDATE chaoxing_sessions
+        SET curriculum_sync_error = %s
+        WHERE user_id = %s
+        """,
+        (error[:2000], user_id),
+    )
+
+
+def sync_chaoxing_profile(user_id: int, cookies_json: str) -> dict:
+    try:
+        session = chaoxing.session_from_cookie_json(cookies_json)
+        user_name = chaoxing.fetch_curriculum_user_name(session)
+        save_chaoxing_profile_success(user_id, user_name)
+        update_chaoxing_cookies(user_id, chaoxing.cookie_jar_to_json(session))
+        return {"ok": True, "user_name": user_name}
+    except Exception as exc:
+        save_chaoxing_profile_error(user_id, str(exc))
+        return {"ok": False, "error": str(exc)}
+
+
+def public_admin_user(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "disabled": bool(row.get("disabled_at")),
+        "disabled_at": row.get("disabled_at") or "",
+        "created_at": row.get("created_at") or "",
+        "last_login_at": row.get("last_login_at") or "",
+        "cx_account": row.get("cx_account") or "",
+        "cx_user_name": row.get("cx_user_name") or "",
+        "session_valid": bool(row.get("session_valid")) if row.get("session_valid") is not None else False,
+        "last_error": row.get("last_error") or "",
+        "cookies_updated_at": row.get("cookies_updated_at") or "",
+        "cx_last_login_at": row.get("cx_last_login_at") or "",
+        "curriculum_synced_at": row.get("curriculum_synced_at") or "",
+        "curriculum_sync_error": row.get("curriculum_sync_error") or "",
+        "query_count": int(row.get("query_count") or 0),
+        "watch_count": int(row.get("watch_count") or 0),
+        "running_watch_count": int(row.get("running_watch_count") or 0),
+        "last_query_at": row.get("last_query_at") or "",
+        "last_watch_at": row.get("last_watch_at") or "",
+    }
+
+
+def fetch_admin_user_rows(limit: int = 500) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT u.id, u.username, u.disabled_at, u.created_at, u.last_login_at,
+               s.cx_account, s.session_valid, s.last_error, s.cookies_updated_at,
+               s.last_login_at AS cx_last_login_at, s.cx_user_name,
+               s.curriculum_synced_at, s.curriculum_sync_error,
+               COALESCE(q.query_count, 0) AS query_count,
+               q.last_query_at,
+               COALESCE(w.watch_count, 0) AS watch_count,
+               COALESCE(w.running_watch_count, 0) AS running_watch_count,
+               w.last_watch_at
+        FROM users u
+        LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS query_count, MAX(created_at) AS last_query_at
+            FROM seat_query_history
+            GROUP BY user_id
+        ) q ON q.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id,
+                   COUNT(*) AS watch_count,
+                   SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_watch_count,
+                   MAX(created_at) AS last_watch_at
+            FROM seat_watch_tasks
+            GROUP BY user_id
+        ) w ON w.user_id = u.id
+        ORDER BY u.id ASC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return [public_admin_user(row) for row in rows]
+
+
+def fetch_admin_user(user_id: int):
+    row = database.fetch_one(
+        """
+        SELECT u.id, u.username, u.disabled_at, u.created_at, u.last_login_at,
+               s.cx_account, s.session_valid, s.last_error, s.cookies_updated_at,
+               s.last_login_at AS cx_last_login_at, s.cx_user_name,
+               s.curriculum_synced_at, s.curriculum_sync_error,
+               COALESCE(q.query_count, 0) AS query_count,
+               q.last_query_at,
+               COALESCE(w.watch_count, 0) AS watch_count,
+               COALESCE(w.running_watch_count, 0) AS running_watch_count,
+               w.last_watch_at
+        FROM users u
+        LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS query_count, MAX(created_at) AS last_query_at
+            FROM seat_query_history
+            GROUP BY user_id
+        ) q ON q.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id,
+                   COUNT(*) AS watch_count,
+                   SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_watch_count,
+                   MAX(created_at) AS last_watch_at
+            FROM seat_watch_tasks
+            GROUP BY user_id
+        ) w ON w.user_id = u.id
+        WHERE u.id = %s
+        """,
+        (user_id,),
+    )
+    return public_admin_user(row) if row else None
+
+
+def admin_summary(users: list) -> dict:
+    return {
+        "users": len(users),
+        "synced_names": sum(1 for user in users if user.get("cx_user_name")),
+        "queries": sum(int(user.get("query_count") or 0) for user in users),
+        "watch_tasks": sum(int(user.get("watch_count") or 0) for user in users),
+    }
 
 
 def save_query_history(user_id: int, payload: dict) -> None:
@@ -645,6 +810,9 @@ class AppHandler(BaseHTTPRequestHandler):
     def current_user(self):
         return auth.current_user_from_header(self.headers.get("Cookie", ""))
 
+    def current_admin(self):
+        return auth.current_admin_from_header(self.headers.get("Cookie", ""))
+
     def require_user(self):
         user = self.current_user()
         if not user:
@@ -652,14 +820,36 @@ class AppHandler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def require_admin(self):
+        admin = self.current_admin()
+        if not admin:
+            self.send_json(401, {"error": "请先登录管理后台"})
+            return None
+        return admin
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/":
             self.send_body(200, INDEX_HTML)
             return
+        if path == "/admin":
+            self.send_body(200, ADMIN_HTML)
+            return
         if path == "/reserve":
             self.handle_reserve_redirect(parsed.query)
+            return
+        if path == "/api/admin/me":
+            self.handle_admin_me()
+            return
+        if path == "/api/admin/users":
+            self.handle_admin_users()
+            return
+        if path.startswith("/api/admin/users/") and path.endswith("/cookie"):
+            self.handle_admin_user_cookie(path)
+            return
+        if path.startswith("/api/admin/users/"):
+            self.handle_admin_user_detail(parsed)
             return
         if path == "/api/me":
             self.handle_me()
@@ -699,6 +889,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.discard_request_body()
                 self.send_json(200, {"ok": True}, headers=[("Set-Cookie", auth.clear_session_cookie())])
                 return
+            if path == "/api/admin/login":
+                self.handle_admin_login()
+                return
+            if path == "/api/admin/logout":
+                self.discard_request_body()
+                self.send_json(200, {"ok": True}, headers=[("Set-Cookie", auth.clear_admin_session_cookie())])
+                return
+            if path == "/api/admin/users/sync-missing-profiles":
+                self.handle_admin_sync_missing_profiles()
+                return
+            if path.startswith("/api/admin/users/") and path.endswith("/disable"):
+                self.handle_admin_user_disabled(path, True)
+                return
+            if path.startswith("/api/admin/users/") and path.endswith("/enable"):
+                self.handle_admin_user_disabled(path, False)
+                return
+            if path.startswith("/api/admin/users/") and path.endswith("/sync-profile"):
+                self.handle_admin_user_sync(path)
+                return
             if path == "/api/chaoxing/login":
                 self.handle_chaoxing_login()
                 return
@@ -727,6 +936,204 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(exc)})
         except Exception as exc:
             self.send_json(500, {"error": str(exc)})
+
+    def handle_admin_login(self):
+        payload = self.read_json()
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        if not config.ADMIN_USERNAME or not config.ADMIN_PASSWORD:
+            self.send_json(500, {"error": "管理账号未配置，请设置 ADMIN_USERNAME 和 ADMIN_PASSWORD"})
+            return
+        if not (
+            hmac.compare_digest(username, config.ADMIN_USERNAME)
+            and hmac.compare_digest(password, config.ADMIN_PASSWORD)
+        ):
+            self.send_json(401, {"error": "管理账号或密码不正确"})
+            return
+        self.send_json(
+            200,
+            {"ok": True, "admin": {"username": username}},
+            headers=[("Set-Cookie", auth.make_admin_session_cookie(username))],
+        )
+
+    def handle_admin_me(self):
+        admin = self.current_admin()
+        self.send_json(200, {"admin": admin})
+
+    def handle_admin_users(self):
+        if not self.require_admin():
+            return
+        users = fetch_admin_user_rows()
+        self.send_json(200, {"users": users, "summary": admin_summary(users)})
+
+    def handle_admin_user_detail(self, parsed):
+        if not self.require_admin():
+            return
+        try:
+            user_id = self.admin_user_id_from_path(parsed.path)
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        user = fetch_admin_user(user_id)
+        if not user:
+            self.send_json(404, {"error": "用户不存在"})
+            return
+        params = parse_qs(parsed.query)
+        query_pagination = admin_pagination(
+            {
+                "page": params.get("query_page", params.get("page", ["1"])),
+                "page_size": params.get("query_page_size", params.get("page_size", ["10"])),
+            }
+        )
+        watch_pagination = admin_pagination(
+            {
+                "page": params.get("watch_page", params.get("page", ["1"])),
+                "page_size": params.get("watch_page_size", params.get("page_size", ["10"])),
+            }
+        )
+        query_total = database.fetch_one(
+            "SELECT COUNT(*) AS count FROM seat_query_history WHERE user_id = %s",
+            (user_id,),
+        )["count"]
+        watch_total = database.fetch_one(
+            "SELECT COUNT(*) AS count FROM seat_watch_tasks WHERE user_id = %s",
+            (user_id,),
+        )["count"]
+
+        query_rows = database.fetch_all(
+            """
+            SELECT id, room_id, fid_enc, day, start_time, end_time,
+                   available_count, occupied_count, pair_count, created_at
+            FROM seat_query_history
+            WHERE user_id = %s
+            ORDER BY id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (user_id, query_pagination["page_size"], query_pagination["offset"]),
+        )
+        for row in query_rows:
+            row["room_name"] = room_label(row["room_id"])
+
+        watch_rows = database.fetch_all(
+            """
+            SELECT id, user_id, room_id, fid_enc, day, start_time, end_time,
+                   target_seats_json, ignore_no_power, ignore_sunny, webhook_url,
+                   interval_seconds, status, matched_seats_json, last_checked_at,
+                   next_check_at, expires_at, last_error, created_at,
+                   reminder_ack_at, reminder_action
+            FROM seat_watch_tasks
+            WHERE user_id = %s
+            ORDER BY id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (user_id, watch_pagination["page_size"], watch_pagination["offset"]),
+        )
+        self.send_json(
+            200,
+            {
+                "user": user,
+                "query_history": query_rows,
+                "watch_history": [public_watch_task(row) for row in watch_rows],
+                "query_pagination": {
+                    **query_pagination,
+                    "total": int(query_total or 0),
+                    "total_pages": max(1, ((int(query_total or 0) - 1) // query_pagination["page_size"]) + 1),
+                },
+                "watch_pagination": {
+                    **watch_pagination,
+                    "total": int(watch_total or 0),
+                    "total_pages": max(1, ((int(watch_total or 0) - 1) // watch_pagination["page_size"]) + 1),
+                },
+            },
+        )
+
+    def handle_admin_user_sync(self, path: str):
+        if not self.require_admin():
+            return
+        try:
+            user_id = self.admin_user_id_from_path(path)
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        cx = get_chaoxing_session(user_id)
+        if not cx:
+            self.send_json(404, {"error": "用户未保存学习通 Cookie"})
+            return
+        result = sync_chaoxing_profile(user_id, cx["cookies_json"])
+        self.send_json(200, {"ok": True, "sync": result, "user": fetch_admin_user(user_id)})
+
+    def handle_admin_user_cookie(self, path: str):
+        if not self.require_admin():
+            return
+        try:
+            user_id = self.admin_user_id_from_path(path)
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        cx = get_chaoxing_session(user_id)
+        if not cx:
+            self.send_json(404, {"error": "用户未保存学习通 Cookie"})
+            return
+        self.send_json(
+            200,
+            {
+                "user_id": user_id,
+                "session_valid": bool(cx["session_valid"]),
+                "cookie": chaoxing.cookie_json_to_header(cx["cookies_json"]),
+            },
+        )
+
+    def handle_admin_user_disabled(self, path: str, disabled: bool):
+        if not self.require_admin():
+            return
+        try:
+            user_id = self.admin_user_id_from_path(path)
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        if disabled:
+            changed = database.execute(
+                "UPDATE users SET disabled_at = NOW() WHERE id = %s AND disabled_at IS NULL",
+                (user_id,),
+            )
+        else:
+            changed = database.execute(
+                "UPDATE users SET disabled_at = NULL WHERE id = %s",
+                (user_id,),
+            )
+        user = fetch_admin_user(user_id)
+        if not user:
+            self.send_json(404, {"error": "用户不存在"})
+            return
+        self.send_json(200, {"ok": True, "changed": changed, "user": user})
+
+    def handle_admin_sync_missing_profiles(self):
+        if not self.require_admin():
+            return
+        rows = database.fetch_all(
+            """
+            SELECT user_id, cookies_json
+            FROM chaoxing_sessions
+            WHERE cx_user_name IS NULL OR cx_user_name = ''
+            ORDER BY user_id ASC
+            LIMIT 20
+            """,
+        )
+        results = []
+        for row in rows:
+            result = sync_chaoxing_profile(row["user_id"], row["cookies_json"])
+            results.append({"user_id": row["user_id"], **result})
+        users = fetch_admin_user_rows()
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "processed": len(results),
+                "results": results,
+                "users": users,
+                "summary": admin_summary(users),
+            },
+        )
 
     def handle_me(self):
         user = self.current_user()
@@ -965,6 +1372,13 @@ class AppHandler(BaseHTTPRequestHandler):
         except (IndexError, ValueError) as exc:
             raise ValueError("提醒 ID 不正确") from exc
 
+    def admin_user_id_from_path(self, path: str) -> int:
+        parts = [part for part in path.split("/") if part]
+        try:
+            return int(parts[3])
+        except (IndexError, ValueError) as exc:
+            raise ValueError("用户 ID 不正确") from exc
+
     def handle_chaoxing_login(self):
         payload = self.read_json()
         account = str(payload.get("account", "")).strip()
@@ -976,7 +1390,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
         session = chaoxing.login(account, password)
         user = auth.get_or_create_external_user(account)
-        save_chaoxing_session(user["id"], account, chaoxing.cookie_jar_to_json(session))
+        cookies_json = chaoxing.cookie_jar_to_json(session)
+        save_chaoxing_session(user["id"], account, cookies_json)
+        sync_chaoxing_profile(user["id"], cookies_json)
         self.send_json(
             200,
             {"ok": True, "account": account, "user": user},
@@ -1035,6 +1451,598 @@ class AppHandler(BaseHTTPRequestHandler):
         response["history_id"] = history_id
 
         self.send_json(200, response)
+
+
+ADMIN_HTML = r"""
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>座位雷达管理后台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef3ef;
+      --panel: #ffffff;
+      --ink: #15211c;
+      --muted: #65746d;
+      --line: #d6e0da;
+      --soft: #f6faf7;
+      --green: #1f5b4e;
+      --green-dark: #143c35;
+      --amber: #b77822;
+      --red: #b84a38;
+      --blue: #315f86;
+      --mono: "SFMono-Regular", "Cascadia Mono", "Menlo", monospace;
+      --body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-family: var(--body);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(90deg, rgba(31, 91, 78, .07) 1px, transparent 1px) 0 0 / 42px 42px,
+        linear-gradient(180deg, rgba(31, 91, 78, .06) 1px, transparent 1px) 0 0 / 42px 42px,
+        var(--bg);
+      color: var(--ink);
+    }
+    header {
+      min-height: 64px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: rgba(255, 255, 255, .9);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      backdrop-filter: blur(14px);
+    }
+    h1 { margin: 0; color: var(--green-dark); font-size: 19px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; color: var(--green-dark); font-size: 16px; }
+    main { width: min(1380px, calc(100vw - 28px)); margin: 0 auto; padding: 20px 0 34px; }
+    section {
+      background: rgba(255, 255, 255, .94);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 14px;
+      box-shadow: 0 12px 28px rgba(21, 33, 28, .05);
+    }
+    input {
+      width: 100%;
+      min-height: 42px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 15px;
+      background: #fbfdfb;
+      color: var(--ink);
+      outline: none;
+    }
+    input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 91, 78, .14); }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: 13px; font-weight: 700; }
+    button {
+      border: 0;
+      border-radius: 6px;
+      min-height: 38px;
+      padding: 9px 13px;
+      background: var(--green);
+      color: #fff;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button:hover { background: var(--green-dark); }
+    button.secondary { background: #334944; }
+    button.ghost { background: #fff; color: var(--green-dark); border: 1px solid var(--line); }
+    button.danger { background: var(--red); }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .hidden { display: none !important; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .top-user { justify-content: flex-end; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .bad { color: var(--red); }
+    .ok { color: #12764f; }
+    .message { min-height: 20px; margin-top: 10px; font-size: 13px; font-weight: 700; }
+    .auth {
+      width: min(460px, 100%);
+      margin: 52px auto;
+      border-top: 5px solid var(--green);
+    }
+    .auth form { display: grid; gap: 12px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .stat b { display: block; margin-top: 5px; color: var(--ink); font: 900 24px/1 var(--mono); }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; min-width: 920px; }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+    th { background: var(--soft); color: #4e6058; font-size: 12px; white-space: nowrap; }
+    tr:hover td { background: #fbfdfb; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: #edf2ef;
+      color: #53645c;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .pill.ok { background: #dff4ea; color: #0a5a3b; }
+    .pill.warn { background: #fff3d6; color: #7b4d0a; }
+    .pill.bad { background: #f8e3df; color: var(--red); }
+    .actions { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+    .actions button { min-height: 32px; padding: 6px 9px; font-size: 12px; }
+    .pager { display: flex; justify-content: flex-end; gap: 8px; align-items: center; margin-top: 10px; }
+    .pager button { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .field { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+    .field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .field b { display: block; color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
+    .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (max-width: 780px) {
+      header { padding: 10px 14px; align-items: flex-start; }
+      main { width: calc(100vw - 16px); padding-top: 12px; }
+      section { padding: 14px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .toolbar .row { justify-content: flex-start; }
+      .stats, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .top-user { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>座位雷达管理后台</h1>
+    <div id="topUser" class="row top-user hidden">
+      <span class="muted" id="adminName"></span>
+      <button class="ghost" id="logoutBtn" type="button">退出</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="loginPanel" class="auth">
+      <h2>管理账号登录</h2>
+      <form id="loginForm">
+        <label>账号
+          <input name="username" autocomplete="username" required>
+        </label>
+        <label>密码
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">登录</button>
+      </form>
+      <div id="loginMessage" class="message"></div>
+    </section>
+
+    <div id="adminPanel" class="hidden">
+      <section>
+        <div class="toolbar">
+          <div>
+            <h2>用户一览</h2>
+            <div class="muted">姓名从数据库读取，只有点击同步按钮才会请求学习通补全。</div>
+          </div>
+          <div class="row">
+            <button class="ghost" id="refreshBtn" type="button">刷新</button>
+            <button id="syncMissingBtn" type="button">补全缺失姓名</button>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat">用户 <b id="statUsers">0</b></div>
+          <div class="stat">查询记录 <b id="statQueries">0</b></div>
+          <div class="stat">蹲座任务 <b id="statWatch">0</b></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>姓名</th>
+                <th>用户（手机号、登录时间）</th>
+                <th>Cookie</th>
+                <th>查询</th>
+                <th>蹲座</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userRows"></tbody>
+          </table>
+        </div>
+        <div id="usersMessage" class="message"></div>
+      </section>
+
+      <section id="detailPanel" class="hidden">
+        <div class="toolbar">
+          <div>
+            <h2 id="detailTitle">用户详情</h2>
+            <div id="detailSub" class="muted"></div>
+          </div>
+          <div class="row">
+            <button class="ghost" id="detailSyncBtn" type="button">同步姓名</button>
+            <button class="ghost" id="closeDetailBtn" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="detail-grid" id="detailFields"></div>
+        <div class="split">
+          <div>
+            <h2>最近查询</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>日期</th>
+                    <th>时段</th>
+                    <th>房间</th>
+                    <th>可预约</th>
+                    <th>已占用</th>
+                    <th>连排</th>
+                  </tr>
+                </thead>
+                <tbody id="queryRows"></tbody>
+              </table>
+            </div>
+            <div class="pager" id="queryPager"></div>
+          </div>
+          <div>
+            <h2>最近蹲座</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>创建时间</th>
+                    <th>日期</th>
+                    <th>时段</th>
+                    <th>房间</th>
+                    <th>状态</th>
+                    <th>命中座位</th>
+                  </tr>
+                </thead>
+                <tbody id="watchRowsAdmin"></tbody>
+              </table>
+            </div>
+            <div class="pager" id="watchPager"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+<script>
+const loginPanel = document.querySelector('#loginPanel');
+const adminPanel = document.querySelector('#adminPanel');
+const topUser = document.querySelector('#topUser');
+const adminName = document.querySelector('#adminName');
+const loginForm = document.querySelector('#loginForm');
+const loginMessage = document.querySelector('#loginMessage');
+const usersMessage = document.querySelector('#usersMessage');
+const userRows = document.querySelector('#userRows');
+const detailPanel = document.querySelector('#detailPanel');
+const detailTitle = document.querySelector('#detailTitle');
+const detailSub = document.querySelector('#detailSub');
+const detailFields = document.querySelector('#detailFields');
+const queryRows = document.querySelector('#queryRows');
+const watchRowsAdmin = document.querySelector('#watchRowsAdmin');
+const queryPager = document.querySelector('#queryPager');
+const watchPager = document.querySelector('#watchPager');
+const detailSyncBtn = document.querySelector('#detailSyncBtn');
+let selectedUserId = null;
+let users = [];
+let selectedQueryPage = 1;
+let selectedWatchPage = 1;
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function setMessage(node, text, ok = false) {
+  node.textContent = text || '';
+  node.className = `message ${ok ? 'ok' : text ? 'bad' : ''}`;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+
+function showLogin() {
+  loginPanel.classList.remove('hidden');
+  adminPanel.classList.add('hidden');
+  topUser.classList.add('hidden');
+}
+
+function showAdmin(admin) {
+  loginPanel.classList.add('hidden');
+  adminPanel.classList.remove('hidden');
+  topUser.classList.remove('hidden');
+  adminName.textContent = admin.username;
+}
+
+function renderSummary(summary) {
+  document.querySelector('#statUsers').textContent = summary.users || 0;
+  document.querySelector('#statQueries').textContent = summary.queries || 0;
+  document.querySelector('#statWatch').textContent = summary.watch_tasks || 0;
+}
+
+function renderUsers(data) {
+  users = data.users || [];
+  renderSummary(data.summary || {});
+  userRows.innerHTML = users.map(user => `<tr>
+    <td>${user.id}</td>
+    <td>
+      <b>${escapeHtml(user.cx_user_name || '-')}</b>
+      ${user.disabled ? '<div><span class="pill bad">已禁用</span></div>' : ''}
+    </td>
+    <td>
+      <b>${escapeHtml(user.username)}</b>
+      <div class="muted">登录：${escapeHtml(user.last_login_at || '-')}</div>
+    </td>
+    <td>
+      ${cookieStatus(user)}
+      <div class="actions"><button class="ghost" type="button" ${user.cx_account ? '' : 'disabled'} onclick="copyUserCookie(${user.id})">复制</button></div>
+    </td>
+    <td>${user.query_count}<div class="muted">${escapeHtml(user.last_query_at || '-')}</div></td>
+    <td>${watchStatus(user)}</td>
+    <td><span class="actions">
+      <button class="ghost" type="button" onclick="viewUser(${user.id})">查看</button>
+      <button type="button" onclick="syncUser(${user.id})">同步</button>
+      <button id="toggleUser${user.id}" class="${user.disabled ? 'ghost' : 'danger'}" type="button" onclick="toggleUserDisabled(${user.id}, ${user.disabled ? 'false' : 'true'})">${user.disabled ? '启用' : '禁用'}</button>
+    </span></td>
+  </tr>`).join('') || '<tr><td colspan="7">暂无用户</td></tr>';
+}
+
+function cookieStatus(user) {
+  if (!user.cx_account) return '<span class="pill warn">未绑定</span>';
+  if (user.session_valid) return '<span class="pill ok">正常</span>';
+  return '<span class="pill bad">异常</span>';
+}
+
+function watchStatus(user) {
+  const running = Number(user.running_watch_count || 0);
+  const status = running > 0
+    ? `<span class="pill warn">蹲座中 ${running}</span>`
+    : '<span class="pill">无进行中</span>';
+  return `${user.watch_count}${status}<div class="muted">${escapeHtml(user.last_watch_at || '-')}</div>`;
+}
+
+async function loadMe() {
+  const data = await api('/api/admin/me', { method: 'GET', headers: {} });
+  if (!data.admin) {
+    showLogin();
+    return;
+  }
+  showAdmin(data.admin);
+  await loadUsers();
+}
+
+async function loadUsers() {
+  const data = await api('/api/admin/users', { method: 'GET', headers: {} });
+  renderUsers(data);
+}
+
+async function refreshAdminDataForUser(id) {
+  await loadUsers();
+  if (selectedUserId === id) {
+    await viewUser(id, selectedQueryPage, selectedWatchPage);
+  }
+}
+
+function renderDetailFields(user) {
+  const fields = [
+    ['用户 ID', user.id],
+    ['用户（手机号）', user.username],
+    ['状态', user.disabled ? '已禁用' : '正常'],
+    ['学习通账号', user.cx_account || '-'],
+    ['学习通姓名', user.cx_user_name || '-'],
+    ['查询次数', user.query_count],
+    ['蹲座次数', user.watch_count]
+  ];
+  detailFields.innerHTML = fields.map(([label, value]) =>
+    `<div class="field"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`
+  ).join('');
+}
+
+function renderPager(target, pagination, kind) {
+  const page = pagination.page || 1;
+  const totalPages = pagination.total_pages || 1;
+  const total = pagination.total || 0;
+  target.innerHTML = `
+    <span class="muted">第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+    <button class="ghost" type="button" ${page <= 1 ? 'disabled' : ''} onclick="changeDetailPage('${kind}', ${page - 1})">上一页</button>
+    <button class="ghost" type="button" ${page >= totalPages ? 'disabled' : ''} onclick="changeDetailPage('${kind}', ${page + 1})">下一页</button>
+  `;
+}
+
+function renderQueryRows(rows, pagination) {
+  queryRows.innerHTML = rows.map(row => `<tr>
+    <td>${escapeHtml(row.created_at)}</td>
+    <td>${escapeHtml(row.day)}</td>
+    <td>${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+    <td>${escapeHtml(row.room_name || row.room_id)}</td>
+    <td>${row.available_count}</td>
+    <td>${row.occupied_count}</td>
+    <td>${row.pair_count}</td>
+  </tr>`).join('') || '<tr><td colspan="7">暂无查询记录</td></tr>';
+  renderPager(queryPager, pagination || {}, 'query');
+}
+
+function renderWatchRows(rows, pagination) {
+  watchRowsAdmin.innerHTML = rows.map(row => {
+    const matched = row.matched_seats || [];
+    const matchedText = matched.length > 12 ? `${matched.slice(0, 12).join(', ')} 等 ${matched.length} 个` : matched.join(', ');
+    const statusClass = row.status === 'matched' ? 'ok' : row.status === 'running' ? 'warn' : '';
+    return `<tr>
+      <td>${escapeHtml(row.created_at)}</td>
+      <td>${escapeHtml(row.day)}</td>
+      <td>${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+      <td>${escapeHtml(row.room_name || row.room_id)}</td>
+      <td><span class="pill ${statusClass}">${escapeHtml(row.status_label || row.status)}</span></td>
+      <td>${escapeHtml(matchedText || '-')}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6">暂无蹲座记录</td></tr>';
+  renderPager(watchPager, pagination || {}, 'watch');
+}
+
+async function viewUser(id, queryPage = 1, watchPage = 1) {
+  selectedUserId = id;
+  selectedQueryPage = queryPage;
+  selectedWatchPage = watchPage;
+  setMessage(usersMessage, '');
+  const data = await api(`/api/admin/users/${id}?query_page=${queryPage}&watch_page=${watchPage}`, { method: 'GET', headers: {} });
+  detailTitle.textContent = `用户详情：${data.user.cx_user_name || data.user.username}`;
+  detailSub.textContent = `查询 ${data.user.query_count} 次，蹲座 ${data.user.watch_count} 次`;
+  renderDetailFields(data.user);
+  renderQueryRows(data.query_history || [], data.query_pagination);
+  renderWatchRows(data.watch_history || [], data.watch_pagination);
+  detailPanel.classList.remove('hidden');
+  detailPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function changeDetailPage(kind, page) {
+  if (!selectedUserId) return;
+  const queryPage = kind === 'query' ? page : selectedQueryPage;
+  const watchPage = kind === 'watch' ? page : selectedWatchPage;
+  viewUser(selectedUserId, queryPage, watchPage);
+}
+
+async function syncUser(id) {
+  setMessage(usersMessage, '正在同步姓名...');
+  const data = await api(`/api/admin/users/${id}/sync-profile`, { method: 'POST', body: '{}' });
+  await loadUsers();
+  if (selectedUserId === id) await viewUser(id, selectedQueryPage, selectedWatchPage);
+  if (data.sync && data.sync.ok) {
+    setMessage(usersMessage, `已同步：${data.sync.user_name}`, true);
+  } else {
+    setMessage(usersMessage, data.sync && data.sync.error ? data.sync.error : '同步失败');
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+async function copyUserCookie(id) {
+  setMessage(usersMessage, '正在读取 Cookie...');
+  try {
+    const data = await api(`/api/admin/users/${id}/cookie`, { method: 'GET', headers: {} });
+    if (!data.cookie) throw new Error('这个用户没有可复制的 Cookie');
+    await copyText(data.cookie);
+    setMessage(usersMessage, data.session_valid ? 'Cookie 已复制' : 'Cookie 已复制，但状态异常', true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+}
+
+async function toggleUserDisabled(id, disabled) {
+  const action = disabled ? '禁用' : '启用';
+  if (!window.confirm(`确定${action}这个用户吗？`)) return;
+  const button = document.querySelector(`#toggleUser${id}`);
+  if (button) button.disabled = true;
+  setMessage(usersMessage, `正在${action}...`);
+  try {
+    await api(`/api/admin/users/${id}/${disabled ? 'disable' : 'enable'}`, { method: 'POST', body: '{}' });
+    await refreshAdminDataForUser(id);
+    setMessage(usersMessage, `已${action}`, true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+    if (button) button.disabled = false;
+  }
+}
+
+loginForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(loginForm).entries());
+  setMessage(loginMessage, '正在登录...');
+  try {
+    const data = await api('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    loginForm.password.value = '';
+    setMessage(loginMessage, '', true);
+    showAdmin(data.admin);
+    await loadUsers();
+  } catch (error) {
+    setMessage(loginMessage, error.message);
+  }
+});
+
+document.querySelector('#logoutBtn').addEventListener('click', async () => {
+  await api('/api/admin/logout', { method: 'POST', body: '{}' });
+  location.reload();
+});
+
+document.querySelector('#refreshBtn').addEventListener('click', async () => {
+  try {
+    await loadUsers();
+    setMessage(usersMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+});
+
+document.querySelector('#syncMissingBtn').addEventListener('click', async () => {
+  if (!window.confirm('本次最多补全 20 个缺失姓名的用户，继续吗？')) return;
+  setMessage(usersMessage, '正在补全缺失姓名...');
+  try {
+    const data = await api('/api/admin/users/sync-missing-profiles', { method: 'POST', body: '{}' });
+    renderUsers(data);
+    setMessage(usersMessage, `已处理 ${data.processed} 个用户`, true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+});
+
+document.querySelector('#closeDetailBtn').addEventListener('click', () => {
+  selectedUserId = null;
+  detailPanel.classList.add('hidden');
+});
+
+detailSyncBtn.addEventListener('click', () => {
+  if (selectedUserId) syncUser(selectedUserId);
+});
+
+loadMe().catch(() => showLogin());
+</script>
+</body>
+</html>
+"""
 
 
 INDEX_HTML = r"""

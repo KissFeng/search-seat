@@ -31,6 +31,8 @@ DB_PASSWORD=123456
 DB_NAME=search_seat
 WATCH_INTERVAL_SECONDS=60
 NOTIFY_WEBHOOK_URL=
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-password
 ```
 
 启动时会自动创建数据库和表。
@@ -99,3 +101,20 @@ ROOMS_JSON=[{"label":"2F-阅览区","room_id":"12818","fid_enc":"087075e03ab2e00
 ```
 
 双人连排目前按连续座位号计算，例如 `051 + 052`。如果实际座位图中存在跨行、走道或编号不连续的情况，需要额外补充座位布局表。
+
+## 管理后台
+
+访问：
+
+```text
+http://127.0.0.1:8000/admin
+```
+
+在 `.env` 配置管理账号：
+
+```env
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-password
+```
+
+后台可以查看所有用户、学习通账号、已持久化的学习通姓名、查询历史和蹲座历史，并支持禁用用户。用户首次登录学习通成功后，后端会尝试请求课程接口保存真实姓名；已有老用户如果缺少姓名，可以在后台点击“同步”或“补全缺失姓名”写入数据库。后台日常打开用户列表只读取数据库，不会每次访问都请求学习通。

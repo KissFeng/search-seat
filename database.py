@@ -55,6 +55,7 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            ensure_column(cursor, "users", "disabled_at", "DATETIME NULL")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chaoxing_sessions (
@@ -74,6 +75,9 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            ensure_column(cursor, "chaoxing_sessions", "cx_user_name", "VARCHAR(128) NULL")
+            ensure_column(cursor, "chaoxing_sessions", "curriculum_synced_at", "DATETIME NULL")
+            ensure_column(cursor, "chaoxing_sessions", "curriculum_sync_error", "TEXT NULL")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_settings (
