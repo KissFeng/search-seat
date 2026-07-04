@@ -4,6 +4,40 @@ import json
 import chaoxing
 
 
+class FakeTimetableResponse:
+    def __init__(self, url, payload=None):
+        self.url = url
+        self.payload = payload or {"success": True, "data": {}}
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class FakeTimetableSession:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, headers=None, params=None, timeout=None, allow_redirects=None):
+        self.calls.append(
+            {
+                "url": url,
+                "headers": headers or {},
+                "params": params,
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+        )
+        if len(self.calls) == 1:
+            return FakeTimetableResponse(
+                "https://course.chaoxing.com/svcourse/new/showTable/myTable?"
+                "taskId=134621&type=4&userId=1269250&isMyTable=true&tableType=7"
+            )
+        return FakeTimetableResponse(url)
+
+
 class CurriculumProfileTests(unittest.TestCase):
     def test_extracts_user_name(self):
         result = {
@@ -66,6 +100,14 @@ class CurriculumProfileTests(unittest.TestCase):
             )
 
         self.assertEqual(str(ctx.exception), "课表页面缺少 userId 参数")
+
+    def test_fetch_timetable_response_keeps_empty_week_num(self):
+        session = FakeTimetableSession()
+
+        result = chaoxing.fetch_timetable_response(session, week_num="")
+
+        self.assertEqual(session.calls[1]["params"]["weekNum"], "")
+        self.assertEqual(result["api_params"]["weekNum"], "")
 
 
 if __name__ == "__main__":

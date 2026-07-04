@@ -60,6 +60,13 @@ def validate_time_range(start_time: str, end_time: str) -> tuple:
     return start, end
 
 
+def timetable_week_num_from_payload(payload: dict) -> str:
+    week_num = str(payload.get("week_num") or config.CHAOXING_TIMETABLE_DEFAULT_WEEK).strip()
+    if week_num and (not week_num.isdigit() or not 1 <= int(week_num) <= 30):
+        raise ValueError("周次必须是 1 到 30 之间的数字")
+    return week_num
+
+
 def public_room(room: dict) -> dict:
     return {
         "label": room["label"],
@@ -1486,9 +1493,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         payload = self.read_json()
-        week_num = str(payload.get("week_num") or config.CHAOXING_TIMETABLE_DEFAULT_WEEK).strip()
-        if week_num and (not week_num.isdigit() or not 1 <= int(week_num) <= 30):
-            raise ValueError("周次必须是 1 到 30 之间的数字")
+        week_num = timetable_week_num_from_payload(payload)
 
         session = chaoxing.session_from_cookie_json(cx["cookies_json"])
         try:
@@ -3554,7 +3559,7 @@ function downloadTimetableJson() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const parameter = latestTimetable.api_params?.parameter || latestTimetable.params?.userId || 'unknown';
-  const week = latestTimetable.api_params?.weekNum || 'default';
+  const week = latestTimetable.api_params?.weekNum || 'all-weeks';
   link.href = url;
   link.download = `chaoxing-timetable-${parameter}-week-${week}.json`;
   document.body.appendChild(link);

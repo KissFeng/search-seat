@@ -18,6 +18,9 @@ class AdminUserSummaryTests(unittest.TestCase):
         self.assertEqual(user["running_watch_count"], 2)
         self.assertEqual(user["watch_count"], 5)
 
+    def test_timetable_week_defaults_to_empty(self):
+        self.assertEqual(app.timetable_week_num_from_payload({}), "")
+
 
 if __name__ == "__main__":
     unittest.main()
