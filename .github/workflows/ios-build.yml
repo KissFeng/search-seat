@@ -1,0 +1,56 @@
+name: Build iOS WebView
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - android-webview-wrapper
+      - main
+    paths:
+      - "ios-webview/**"
+      - ".github/workflows/ios-build.yml"
+
+jobs:
+  build:
+    name: Build unsigned iOS artifact
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build without code signing
+        run: |
+          set -euo pipefail
+          DERIVED_DATA="$PWD/build/DerivedData"
+          xcodebuild \
+            -project ios-webview/SeatRadar.xcodeproj \
+            -scheme SeatRadar \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/SeatRadar.app"
+          test -d "$APP_PATH"
+          rm -rf build/package
+          mkdir -p build/package/Payload
+          cp -R "$APP_PATH" build/package/Payload/
+          (cd build/package && zip -qry ../SeatRadar-unsigned.ipa Payload)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeatRadar-iOS-unsigned
+          path: |
+            build/SeatRadar-unsigned.ipa
+            build/DerivedData/Build/Products/Release-iphoneos/SeatRadar.app
+          if-no-files-found: error
