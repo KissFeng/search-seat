@@ -87,6 +87,8 @@ NOTIFY_WEBHOOK_URL = get_env("NOTIFY_WEBHOOK_URL")
 
 CHAOXING_SELECT_URL = "https://office.chaoxing.com/front/third/apps/seat/select"
 CHAOXING_USED_SEATS_URL = "https://office.chaoxing.com/data/apps/seat/getusedseatnums"
+CHAOXING_SEAT_INDEX_URL = "https://office.chaoxing.com/data/apps/seat/index"
+CHAOXING_SEAT_RESERVE_LIST_URL = "https://office.chaoxing.com/data/apps/seat/reservelist"
 CHAOXING_LOGIN_URL = "https://passport2.chaoxing.com/fanyalogin"
 CHAOXING_LOGIN_REFER = "https%3A%2F%2Fi.chaoxing.com"
 CHAOXING_LOGIN_TRANSFER_KEY = "u2oh6Vu^HWe4_AES"

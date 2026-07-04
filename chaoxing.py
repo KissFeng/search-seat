@@ -162,6 +162,32 @@ def build_select_url(room_id: str, fid_enc: str, day: str) -> str:
     return f"{config.CHAOXING_SELECT_URL}?{query}"
 
 
+def build_office_index_url(fid_enc: str) -> str:
+    return "https://office.chaoxing.com/front/apps/seat/index?" + urlencode({"fidEnc": fid_enc})
+
+
+def build_reserve_list_url(fid_enc: str) -> str:
+    return "https://office.chaoxing.com/front/third/apps/seat/reserve/list?" + urlencode({"deptIdEnc": fid_enc})
+
+
+def build_office_index_headers(fid_enc: str) -> dict:
+    return {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": build_office_index_url(fid_enc),
+    }
+
+
+def build_reserve_list_headers(fid_enc: str) -> dict:
+    return {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": build_reserve_list_url(fid_enc),
+    }
+
+
 def build_reserve_url(room_id: str, fid_enc: str, day: str, seat_num: str = "") -> str:
     url = build_select_url(room_id, fid_enc, day)
     return f"{url}#seat={seat_num}" if seat_num else url
@@ -281,6 +307,50 @@ def prepare_office_session(session: requests.Session, room_id: str, fid_enc: str
         timeout=12,
         allow_redirects=True,
     )
+
+
+def prepare_office_index_session(session: requests.Session, fid_enc: str) -> None:
+    session.get(
+        build_office_index_url(fid_enc),
+        headers=build_base_headers(),
+        timeout=12,
+        allow_redirects=True,
+    )
+
+
+def fetch_seat_index(session: requests.Session, fid_enc: str = config.FID_ENC) -> dict:
+    prepare_office_index_session(session, fid_enc)
+    resp = session.get(
+        config.CHAOXING_SEAT_INDEX_URL,
+        headers=build_office_index_headers(fid_enc),
+        params={"fidEnc": fid_enc},
+        timeout=12,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_reserve_list(session: requests.Session, fid_enc: str = config.FID_ENC, page_size: int = 10) -> dict:
+    session.get(
+        build_reserve_list_url(fid_enc),
+        headers=build_base_headers(),
+        timeout=12,
+        allow_redirects=True,
+    )
+    resp = session.get(
+        config.CHAOXING_SEAT_RESERVE_LIST_URL,
+        headers=build_reserve_list_headers(fid_enc),
+        params={
+            "indexId": "0",
+            "pageSize": str(page_size),
+            "type": "-1",
+            "fidEnc": fid_enc,
+            "showQrCode": "1",
+        },
+        timeout=12,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def query_seats(

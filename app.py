@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
 import hmac
@@ -22,6 +22,12 @@ WATCH_STATUS_LABELS = {
     "matched": "已蹲到",
     "expired": "已到点",
     "cancelled": "已取消",
+}
+RESERVE_STATUS_LABELS = {
+    0: "待履约",
+    1: "使用中",
+    2: "已完成",
+    3: "已取消",
 }
 WATCH_WORKER_STARTED = False
 WATCH_WORKER_LOCK = threading.Lock()
@@ -60,6 +66,14 @@ def validate_time_range(start_time: str, end_time: str) -> tuple:
     return start, end
 
 
+def millisecond_time(value) -> str:
+    try:
+        timestamp = int(value) / 1000
+    except (TypeError, ValueError):
+        return ""
+    return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime("%H:%M")
+
+
 def timetable_week_num_from_payload(payload: dict) -> str:
     week_num = str(payload.get("week_num") or config.CHAOXING_TIMETABLE_DEFAULT_WEEK).strip()
     if week_num and (not week_num.isdigit() or not 1 <= int(week_num) <= 30):
@@ -86,6 +100,52 @@ def room_label(room_id: str) -> str:
         if str(room.get("room_id")) == str(room_id):
             return room.get("label") or str(room_id)
     return str(room_id)
+
+
+def public_current_reserve(item: dict) -> dict:
+    room_id = str(item.get("roomId") or "")
+    seat_num = str(item.get("seatNum") or "").strip()
+    day = str(item.get("today") or "").strip()
+    room_parts = [
+        str(item.get("secondLevelName") or "").strip(),
+        str(item.get("thirdLevelName") or "").strip(),
+    ]
+    room_name = "-".join(part for part in room_parts if part) or room_label(room_id)
+    status = item.get("status")
+    start_time = millisecond_time(item.get("startTime"))
+    end_time = millisecond_time(item.get("endTime"))
+    time_range = f"{start_time}-{end_time}" if start_time and end_time else ""
+    return {
+        "id": item.get("id"),
+        "room_id": room_id,
+        "room_name": room_name,
+        "seat_num": seat_num,
+        "day": day,
+        "start_time": start_time,
+        "end_time": end_time,
+        "time_range": time_range,
+        "status": status,
+        "status_label": RESERVE_STATUS_LABELS.get(status, str(status)),
+        "reserve_url": local_reserve_path(room_id, day, seat_num) if room_id and day else "",
+    }
+
+
+def public_current_reserves(result: dict) -> list:
+    reserves = result.get("data", {}).get("curReserves", [])
+    if not isinstance(reserves, list):
+        return []
+    return [public_current_reserve(item) for item in reserves if isinstance(item, dict)]
+
+
+def public_reserve_records(result: dict, limit: int = 10) -> list:
+    records = result.get("data", {}).get("reserveList", [])
+    if not isinstance(records, list):
+        return []
+    return [
+        public_current_reserve(item)
+        for item in records[:limit]
+        if isinstance(item, dict)
+    ]
 
 
 def local_reserve_path(room_id: str, day: str, seat: str = "") -> str:
@@ -865,6 +925,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/history":
                 self.handle_history()
                 return
+            if path == "/api/seats/current-reserves":
+                self.handle_current_reserves()
+                return
+            if path == "/api/seats/reserve-history":
+                self.handle_reserve_history()
+                return
             if path == "/api/watch-tasks":
                 self.handle_watch_tasks()
                 return
@@ -1204,6 +1270,54 @@ class AppHandler(BaseHTTPRequestHandler):
         for row in rows:
             row["room_name"] = room_label(row["room_id"])
         self.send_json(200, {"history": rows})
+
+    def handle_current_reserves(self):
+        user = self.require_user()
+        if not user:
+            return
+        cx = get_chaoxing_session(user["id"])
+        if not cx:
+            self.send_json(409, {"error": "请先登录学习通"})
+            return
+
+        session = chaoxing.session_from_cookie_json(cx["cookies_json"])
+        try:
+            result = chaoxing.fetch_seat_index(session, config.FID_ENC)
+        except Exception as exc:
+            mark_chaoxing_error(user["id"], str(exc))
+            raise
+
+        if not result.get("success"):
+            mark_chaoxing_error(user["id"], str(result))
+            self.send_json(502, {"error": "学习通预约接口返回失败", "raw": result})
+            return
+
+        update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
+        self.send_json(200, {"ok": True, "reserves": public_current_reserves(result)})
+
+    def handle_reserve_history(self):
+        user = self.require_user()
+        if not user:
+            return
+        cx = get_chaoxing_session(user["id"])
+        if not cx:
+            self.send_json(409, {"error": "请先登录学习通"})
+            return
+
+        session = chaoxing.session_from_cookie_json(cx["cookies_json"])
+        try:
+            result = chaoxing.fetch_reserve_list(session, config.FID_ENC, page_size=10)
+        except Exception as exc:
+            mark_chaoxing_error(user["id"], str(exc))
+            raise
+
+        if not result.get("success"):
+            mark_chaoxing_error(user["id"], str(result))
+            self.send_json(502, {"error": "学习通预约记录接口返回失败", "raw": result})
+            return
+
+        update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
+        self.send_json(200, {"ok": True, "records": public_reserve_records(result, 10)})
 
     def handle_history_detail(self, path: str):
         user = self.require_user()
@@ -2321,6 +2435,99 @@ INDEX_HTML = r"""
     .hidden { display: none !important; }
     .statusbar { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; }
     .statusbar h2 { margin-bottom: 6px; }
+    #resultsPanel #accountSection { margin-bottom: 16px; }
+    #resultsPanel #resultsEmpty,
+    #resultsPanel #resultsContent { margin-top: 16px; }
+    .reserve-overview {
+      margin-bottom: 14px;
+      padding: 12px;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #fbfdf9 0%, #f5faf6 100%);
+    }
+    .reserve-overview-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .reserve-overview-head h3 {
+      margin: 0;
+      color: var(--shelf-dark);
+      font-size: 14px;
+      font-weight: 850;
+    }
+    .reserve-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+    }
+    .reserve-card {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
+      align-items: center;
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid rgba(18, 141, 97, .18);
+      border-radius: 8px;
+      background: #fff;
+      text-decoration: none;
+      color: inherit;
+      cursor: default;
+    }
+    .reserve-seat {
+      display: grid;
+      place-items: center;
+      min-width: 58px;
+      height: 44px;
+      border-radius: 7px;
+      background: var(--available-soft);
+      color: #0b4d35;
+      font: 900 18px/1 var(--mono-font);
+    }
+    .reserve-main { min-width: 0; }
+    .reserve-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 850;
+    }
+    .reserve-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .reserve-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 850;
+      white-space: nowrap;
+      background: #e6f0ff;
+      color: #1d5187;
+    }
+    .reserve-badge.using { background: var(--available-soft); color: #0a5a3b; }
+    .reserve-badge.pending { background: #fff3d1; color: #7b4d0a; }
+    .reserve-empty {
+      grid-column: 1 / -1;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+      background: rgba(255, 255, 255, .72);
+    }
     .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
     .stat {
       position: relative;
@@ -2400,7 +2607,7 @@ INDEX_HTML = r"""
     }
     td { background: rgba(255, 255, 255, .7); }
     tr:hover td { background: #fbfdf9; }
-    .tabs { display: inline-grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: #edf3ee; }
+    .tabs { display: inline-grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 4px; margin-bottom: 12px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: #edf3ee; }
     .tab { min-height: 34px; background: transparent; color: #44534c; border: 0; box-shadow: none; }
     .tab:hover { transform: none; box-shadow: none; background: rgba(255, 255, 255, .72); }
     .tab.active { background: #fff; color: var(--shelf-dark); border-color: transparent; box-shadow: 0 6px 14px rgba(22, 40, 34, .08); }
@@ -2581,12 +2788,14 @@ INDEX_HTML = r"""
       .stat b { font-size: 18px; }
       .wide { grid-column: span 1; }
       .statusbar { grid-template-columns: 1fr; }
+      .reserve-overview-head { align-items: flex-start; }
+      .reserve-grid { grid-template-columns: 1fr; }
       .button-link, form > button { width: 100%; }
       .section-head { align-items: stretch; flex-direction: row; }
       .section-head h2 { align-self: center; }
       .section-actions { justify-content: flex-end; }
       #deleteSelectedHistoryBtn { display: none; }
-      .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px; }
       .tab { width: 100%; padding-left: 8px; padding-right: 8px; }
       .seat-grid { grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 6px; padding: 8px; }
       .pair-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
@@ -2666,17 +2875,16 @@ INDEX_HTML = r"""
     </section>
 
     <div id="appPanel" class="hidden">
-      <section id="accountSection">
-        <div class="statusbar">
-          <div>
-            <h2>学习通账号</h2>
-            <div id="cxStatus" class="muted"></div>
-          </div>
-          <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
-        </div>
-      </section>
-
       <section id="querySection" class="app-view" data-app-view>
+        <div class="reserve-overview">
+          <div class="reserve-overview-head">
+            <h3>我的预约</h3>
+            <div id="currentReservesStatus" class="muted hidden"></div>
+          </div>
+          <div id="currentReserveCards" class="reserve-grid">
+            <div class="reserve-empty">正在读取预约</div>
+          </div>
+        </div>
         <h2>座位查询</h2>
         <form id="queryForm">
           <label>房间
@@ -2705,6 +2913,15 @@ INDEX_HTML = r"""
       </section>
 
       <section id="resultsPanel" class="app-view hidden" data-app-view>
+        <div id="accountSection">
+          <div class="statusbar">
+            <div>
+              <h2>学习通账号</h2>
+              <div id="cxStatus" class="muted"></div>
+            </div>
+            <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
+          </div>
+        </div>
         <div id="resultsEmpty" class="view-empty">
           <div>
             <b>还没有查询结果</b>
@@ -2814,6 +3031,7 @@ INDEX_HTML = r"""
         <div class="tabs">
           <button class="tab active" type="button" data-history-kind="query">查询历史</button>
           <button class="tab" type="button" data-history-kind="watch">蹲座历史</button>
+          <button class="tab" type="button" data-history-kind="reserve">预约记录</button>
         </div>
         <div id="queryHistoryPanel">
           <table class="responsive-table">
@@ -2851,6 +3069,21 @@ INDEX_HTML = r"""
             <tbody id="watchHistoryRows"></tbody>
           </table>
           <div class="mobile-list" id="watchHistoryCards"></div>
+        </div>
+        <div id="reserveHistoryPanel" class="hidden">
+          <table class="responsive-table">
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>时段</th>
+                <th>房间</th>
+                <th>座位</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="reserveHistoryRows"></tbody>
+          </table>
+          <div class="mobile-list" id="reserveHistoryCards"></div>
         </div>
       </section>
 
@@ -2993,11 +3226,16 @@ const officialLink = document.querySelector('#officialLink');
 const historyRows = document.querySelector('#historyRows');
 const watchRows = document.querySelector('#watchRows');
 const watchHistoryRows = document.querySelector('#watchHistoryRows');
+const reserveHistoryRows = document.querySelector('#reserveHistoryRows');
 const historyCards = document.querySelector('#historyCards');
 const watchCards = document.querySelector('#watchCards');
 const watchHistoryCards = document.querySelector('#watchHistoryCards');
+const reserveHistoryCards = document.querySelector('#reserveHistoryCards');
+const currentReservesStatus = document.querySelector('#currentReservesStatus');
+const currentReserveCards = document.querySelector('#currentReserveCards');
 const queryHistoryPanel = document.querySelector('#queryHistoryPanel');
 const watchHistoryPanel = document.querySelector('#watchHistoryPanel');
+const reserveHistoryPanel = document.querySelector('#reserveHistoryPanel');
 const historySelectAll = document.querySelector('#historySelectAll');
 const deleteSelectedHistoryBtn = document.querySelector('#deleteSelectedHistoryBtn');
 const refreshWatchBtn = document.querySelector('#refreshWatchBtn');
@@ -3043,11 +3281,13 @@ const appViews = Array.from(document.querySelectorAll('[data-app-view]'));
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
 const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
+const CURRENT_RESERVES_REFRESH_MS = 10000;
 let latestResult = null;
 let latestTimetable = null;
 let officialIndexUrl = '';
 let historyItems = [];
 let watchItems = [];
+let reserveHistoryItems = [];
 let showAllHistory = false;
 let activeHistoryKind = 'query';
 let activeWatchAlert = null;
@@ -3057,6 +3297,7 @@ let startWatchResolver = null;
 let disclaimerResolver = null;
 let watchAlertSource = null;
 let watchAlertReconnectTimer = null;
+let currentReservesTimer = null;
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -3187,6 +3428,65 @@ function stopWatchAlertStream() {
     watchAlertSource.close();
     watchAlertSource = null;
   }
+}
+
+function stopCurrentReservesRefresh() {
+  if (currentReservesTimer) {
+    clearInterval(currentReservesTimer);
+    currentReservesTimer = null;
+  }
+}
+
+function currentReserveStatusClass(status) {
+  if (status === 1) return 'using';
+  if (status === 0) return 'pending';
+  return '';
+}
+
+function renderCurrentReserves(reserves) {
+  if (!reserves.length) {
+    currentReserveCards.innerHTML = '<div class="reserve-empty">当前没有预约</div>';
+    return;
+  }
+  currentReserveCards.innerHTML = reserves.map(item => {
+    const badgeClass = currentReserveStatusClass(item.status);
+    const detail = [
+      item.room_name || item.room_id,
+      item.day,
+      item.time_range
+    ].filter(Boolean).join(' · ');
+    const body = `<span class="reserve-seat">${escapeHtml(item.seat_num || '-')}</span>
+      <span class="reserve-main">
+        <span class="reserve-title">
+          <span>${escapeHtml(item.room_name || item.room_id || '预约座位')}</span>
+          <span class="reserve-badge ${badgeClass}">${escapeHtml(item.status_label || '-')}</span>
+        </span>
+        <span class="reserve-meta">${escapeHtml(detail || '-')}</span>
+      </span>`;
+    return `<div class="reserve-card">${body}</div>`;
+  }).join('');
+}
+
+async function loadCurrentReserves({ silent = false } = {}) {
+  if (!silent) {
+    currentReservesStatus.textContent = '正在刷新';
+  }
+  try {
+    const data = await api('/api/seats/current-reserves', { method: 'GET', headers: {} });
+    renderCurrentReserves(data.reserves || []);
+    currentReservesStatus.textContent = `每 10 秒刷新 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+  } catch (error) {
+    currentReservesStatus.textContent = error.message;
+    if (!silent) {
+      currentReserveCards.innerHTML = '<div class="reserve-empty">暂时无法读取预约</div>';
+    }
+  }
+}
+
+function startCurrentReservesRefresh() {
+  stopCurrentReservesRefresh();
+  loadCurrentReserves();
+  currentReservesTimer = setInterval(() => loadCurrentReserves({ silent: true }), CURRENT_RESERVES_REFRESH_MS);
 }
 
 function scheduleWatchAlertStreamReconnect() {
@@ -3330,6 +3630,7 @@ function renderMe(data) {
     appPanel.classList.add('hidden');
     topUser.classList.add('hidden');
     stopWatchAlertStream();
+    stopCurrentReservesRefresh();
     return;
   }
   authPanel.classList.add('hidden');
@@ -3344,6 +3645,7 @@ function renderMe(data) {
     cxStatus.textContent = '未登录学习通';
   }
   startWatchAlertStream();
+  startCurrentReservesRefresh();
   updateOfficialLink();
   switchAppView('querySection');
 }
@@ -3406,6 +3708,12 @@ async function loadWatchTasks() {
   renderWatchRows();
   renderWatchHistoryRows();
   await checkWatchAlerts();
+}
+
+async function loadReserveHistory() {
+  const data = await api('/api/seats/reserve-history', { method: 'GET', headers: {} });
+  reserveHistoryItems = data.records || [];
+  renderReserveHistoryRows();
 }
 
 function watchPageItems() {
@@ -3496,8 +3804,48 @@ function renderWatchHistoryRows() {
   renderHistoryControls();
 }
 
+function reserveStatusClass(status) {
+  if (status === 1 || status === 2) return 'done';
+  if (status === 0) return '';
+  return 'stop';
+}
+
+function renderReserveHistoryRows() {
+  const visibleRecords = reserveHistoryItems;
+  reserveHistoryRows.innerHTML = visibleRecords.map(row => {
+    const statusClass = reserveStatusClass(row.status);
+    return `<tr>
+      <td data-label="日期">${escapeHtml(row.day || '-')}</td>
+      <td data-label="时段">${escapeHtml(row.time_range || '-')}</td>
+      <td data-label="房间">${escapeHtml(row.room_name || row.room_id || '-')}</td>
+      <td data-label="座位">${escapeHtml(row.seat_num || '-')}</td>
+      <td data-label="状态"><span class="status-pill ${statusClass}">${escapeHtml(row.status_label || '-')}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5">暂无预约记录</td></tr>';
+  reserveHistoryCards.innerHTML = visibleRecords.map(row => {
+    const statusClass = reserveStatusClass(row.status);
+    return `<article class="mobile-card">
+      <div class="mobile-card-head">
+        <div>
+          <div class="mobile-title">${escapeHtml(row.seat_num || '-')}<small>${escapeHtml(row.room_name || row.room_id || '-')}</small></div>
+          <div class="mobile-subtitle">${escapeHtml(row.day || '-')} · ${escapeHtml(row.time_range || '-')}</div>
+        </div>
+        <span class="status-pill ${statusClass}">${escapeHtml(row.status_label || '-')}</span>
+      </div>
+    </article>`;
+  }).join('') || '<div class="mobile-empty">暂无预约记录</div>';
+  renderHistoryControls();
+}
+
 function renderHistoryControls() {
-  const total = activeHistoryKind === 'watch' ? watchItems.length : historyItems.length;
+  if (activeHistoryKind === 'reserve') {
+    toggleHistoryBtn.classList.add('hidden');
+    deleteSelectedHistoryBtn.classList.add('hidden');
+    return;
+  }
+  const total = activeHistoryKind === 'watch'
+    ? watchItems.length
+    : historyItems.length;
   toggleHistoryBtn.classList.toggle('hidden', total <= DEFAULT_HISTORY_LIMIT);
   toggleHistoryBtn.textContent = showAllHistory ? '收起' : `显示全部 ${total} 条`;
   deleteSelectedHistoryBtn.classList.toggle('hidden', activeHistoryKind !== 'query');
@@ -3511,8 +3859,10 @@ function setHistoryKind(kind) {
   });
   queryHistoryPanel.classList.toggle('hidden', kind !== 'query');
   watchHistoryPanel.classList.toggle('hidden', kind !== 'watch');
+  reserveHistoryPanel.classList.toggle('hidden', kind !== 'reserve');
   renderHistoryRows();
   renderWatchHistoryRows();
+  renderReserveHistoryRows();
 }
 
 function renderResults(result) {
@@ -3685,6 +4035,7 @@ authForm.addEventListener('submit', async event => {
     await loadMe();
     await loadHistory();
     await loadWatchTasks();
+    await loadReserveHistory();
   } catch (error) {
     setMessage(authMessage, error.message);
   }
@@ -3712,6 +4063,8 @@ toggleHistoryBtn.addEventListener('click', () => {
   showAllHistory = !showAllHistory;
   if (activeHistoryKind === 'watch') {
     renderWatchHistoryRows();
+  } else if (activeHistoryKind === 'reserve') {
+    renderReserveHistoryRows();
   } else {
     renderHistoryRows();
   }
@@ -3866,6 +4219,7 @@ loadMe().then(async data => {
   if (!authPanel.classList.contains('hidden')) return;
   await loadHistory();
   await loadWatchTasks();
+  await loadReserveHistory();
 }).catch(() => {});
 setInterval(() => {
   if (!authPanel.classList.contains('hidden')) return;
