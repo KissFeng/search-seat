@@ -16,6 +16,10 @@ import config
 CHAOXING_CURRICULUM_URL = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
 
 
+class ChaoxingAuthError(RuntimeError):
+    pass
+
+
 def encrypt_by_aes(message: str, key: str = config.CHAOXING_LOGIN_TRANSFER_KEY) -> str:
     key_bytes = key.encode("utf-8")
     cipher = AES.new(key_bytes, AES.MODE_CBC, iv=key_bytes)
@@ -153,6 +157,15 @@ def session_from_cookie_header(cookie_raw: str) -> requests.Session:
     return session
 
 
+def parse_login_result(result: dict) -> dict:
+    if not result.get("status"):
+        message = result.get("msg2") or result.get("msg") or "账号或密码不正确"
+        raise ChaoxingAuthError(f"学习通登录失败：{message}")
+    if result.get("containTwoFactorLogin"):
+        raise ChaoxingAuthError("学习通登录需要二次验证，当前项目无法自动完成")
+    return result
+
+
 def login(account: str, password: str) -> requests.Session:
     session = requests.Session()
     headers = {
@@ -176,12 +189,7 @@ def login(account: str, password: str) -> requests.Session:
 
     resp = session.post(config.CHAOXING_LOGIN_URL, headers=headers, data=data, timeout=12)
     resp.raise_for_status()
-    result = resp.json()
-    if not result.get("status"):
-        message = result.get("msg2") or result.get("msg") or result
-        raise RuntimeError(f"学习通登录失败：{message}")
-    if result.get("containTwoFactorLogin"):
-        raise RuntimeError("学习通登录需要二次验证，当前项目无法自动完成")
+    result = parse_login_result(resp.json())
 
     redirect_url = unquote(result.get("url", ""))
     if redirect_url.startswith("http"):

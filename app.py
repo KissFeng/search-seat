@@ -830,46 +830,51 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/":
-            self.send_body(200, INDEX_HTML)
-            return
-        if path == "/admin":
-            self.send_body(200, ADMIN_HTML)
-            return
-        if path == "/reserve":
-            self.handle_reserve_redirect(parsed.query)
-            return
-        if path == "/api/admin/me":
-            self.handle_admin_me()
-            return
-        if path == "/api/admin/users":
-            self.handle_admin_users()
-            return
-        if path.startswith("/api/admin/users/") and path.endswith("/cookie"):
-            self.handle_admin_user_cookie(path)
-            return
-        if path.startswith("/api/admin/users/"):
-            self.handle_admin_user_detail(parsed)
-            return
-        if path == "/api/me":
-            self.handle_me()
-            return
-        if path == "/api/history":
-            self.handle_history()
-            return
-        if path == "/api/watch-tasks":
-            self.handle_watch_tasks()
-            return
-        if path == "/api/watch-alerts":
-            self.handle_watch_alerts()
-            return
-        if path == "/api/watch-alerts/stream":
-            self.handle_watch_alert_stream()
-            return
-        if path.startswith("/api/history/"):
-            self.handle_history_detail(path)
-            return
-        self.send_json(404, {"error": "not found"})
+        try:
+            if path == "/":
+                self.send_body(200, INDEX_HTML)
+                return
+            if path == "/admin":
+                self.send_body(200, ADMIN_HTML)
+                return
+            if path == "/reserve":
+                self.handle_reserve_redirect(parsed.query)
+                return
+            if path == "/api/admin/me":
+                self.handle_admin_me()
+                return
+            if path == "/api/admin/users":
+                self.handle_admin_users()
+                return
+            if path.startswith("/api/admin/users/") and path.endswith("/cookie"):
+                self.handle_admin_user_cookie(path)
+                return
+            if path.startswith("/api/admin/users/"):
+                self.handle_admin_user_detail(parsed)
+                return
+            if path == "/api/me":
+                self.handle_me()
+                return
+            if path == "/api/history":
+                self.handle_history()
+                return
+            if path == "/api/watch-tasks":
+                self.handle_watch_tasks()
+                return
+            if path == "/api/watch-alerts":
+                self.handle_watch_alerts()
+                return
+            if path == "/api/watch-alerts/stream":
+                self.handle_watch_alert_stream()
+                return
+            if path.startswith("/api/history/"):
+                self.handle_history_detail(path)
+                return
+            self.send_json(404, {"error": "not found"})
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+        except Exception as exc:
+            self.send_json(500, {"error": f"服务器内部错误：{str(exc)}"})
 
     def handle_reserve_redirect(self, query: str):
         params = parse_qs(query)
@@ -897,15 +902,19 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True}, headers=[("Set-Cookie", auth.clear_admin_session_cookie())])
                 return
             if path == "/api/admin/users/sync-missing-profiles":
+                self.discard_request_body()
                 self.handle_admin_sync_missing_profiles()
                 return
             if path.startswith("/api/admin/users/") and path.endswith("/disable"):
+                self.discard_request_body()
                 self.handle_admin_user_disabled(path, True)
                 return
             if path.startswith("/api/admin/users/") and path.endswith("/enable"):
+                self.discard_request_body()
                 self.handle_admin_user_disabled(path, False)
                 return
             if path.startswith("/api/admin/users/") and path.endswith("/sync-profile"):
+                self.discard_request_body()
                 self.handle_admin_user_sync(path)
                 return
             if path == "/api/chaoxing/login":
@@ -918,12 +927,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.handle_history_delete()
                 return
             if path.startswith("/api/history/") and path.endswith("/delete"):
+                self.discard_request_body()
                 self.handle_history_delete(path)
                 return
             if path == "/api/watch-tasks":
                 self.handle_watch_task_create()
                 return
             if path.startswith("/api/watch-tasks/") and path.endswith("/cancel"):
+                self.discard_request_body()
                 self.handle_watch_task_cancel(path)
                 return
             if path.startswith("/api/watch-alerts/") and path.endswith("/ack"):
@@ -963,6 +974,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_admin_users(self):
         if not self.require_admin():
             return
+        database.init_db()
         users = fetch_admin_user_rows()
         self.send_json(200, {"users": users, "summary": admin_summary(users)})
 
@@ -1388,8 +1400,16 @@ class AppHandler(BaseHTTPRequestHandler):
         if not password:
             raise ValueError("请填写学习通密码")
 
-        session = chaoxing.login(account, password)
-        user = auth.get_or_create_external_user(account)
+        try:
+            session = chaoxing.login(account, password)
+        except chaoxing.ChaoxingAuthError as exc:
+            self.send_json(401, {"error": str(exc)})
+            return
+        try:
+            user = auth.get_or_create_external_user(account)
+        except PermissionError as exc:
+            self.send_json(403, {"error": str(exc)})
+            return
         cookies_json = chaoxing.cookie_jar_to_json(session)
         save_chaoxing_session(user["id"], account, cookies_json)
         sync_chaoxing_profile(user["id"], cookies_json)
@@ -1764,7 +1784,23 @@ async function api(path, options = {}) {
       ...(options.headers || {})
     }
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const plain = text.trim();
+      if (res.status >= 500) {
+        const serverText = plain && !plain.startsWith('<') ? `：${plain.slice(0, 120)}` : '';
+        throw new Error(`服务器内部错误（${res.status}）${serverText}。请查看后端日志；如果刚更新后台，请重启服务让数据库迁移生效。`);
+      }
+      const htmlHint = plain.startsWith('<')
+        ? '接口返回了页面而不是 JSON，请刷新后台并重新登录；如果刚更新代码，请重启服务。'
+        : `接口返回格式不正确：${plain.slice(0, 120) || '空响应'}`;
+      throw new Error(htmlHint);
+    }
+  }
   if (!res.ok) throw new Error(data.error || '请求失败');
   return data;
 }
@@ -2959,7 +2995,23 @@ async function api(path, options = {}) {
       ...(options.headers || {})
     }
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const plain = text.trim();
+      if (res.status >= 500) {
+        const serverText = plain && !plain.startsWith('<') ? `：${plain.slice(0, 120)}` : '';
+        throw new Error(`服务器内部错误（${res.status}）${serverText}。请稍后重试；如果刚更新代码，请重启服务。`);
+      }
+      const message = plain.startsWith('<')
+        ? '接口返回了页面而不是 JSON，请刷新页面并重新登录。'
+        : `接口返回格式不正确：${plain.slice(0, 120) || '空响应'}`;
+      throw new Error(message);
+    }
+  }
   if (!res.ok) throw new Error(data.error || '请求失败');
   return data;
 }

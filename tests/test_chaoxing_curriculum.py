@@ -36,6 +36,12 @@ class CurriculumProfileTests(unittest.TestCase):
 
         self.assertEqual(chaoxing.cookie_json_to_header(cookies_json), "UID=123; vc3=abc")
 
+    def test_parse_login_failure_raises_auth_error(self):
+        with self.assertRaises(chaoxing.ChaoxingAuthError) as ctx:
+            chaoxing.parse_login_result({"status": False, "msg2": "用户名或密码错误"})
+
+        self.assertEqual(str(ctx.exception), "学习通登录失败：用户名或密码错误")
+
 
 if __name__ == "__main__":
     unittest.main()
