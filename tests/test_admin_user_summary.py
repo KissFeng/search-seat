@@ -60,6 +60,24 @@ class AdminUserSummaryTests(unittest.TestCase):
         self.assertEqual(reserve["status_label"], "待履约")
         self.assertEqual(reserve["time_range"], "16:00-20:00")
 
+    def test_public_current_reserve_marks_expired_pending_as_violation(self):
+        item = {
+            "roomId": 12818,
+            "seatNum": "327",
+            "secondLevelName": "2F",
+            "thirdLevelName": "阅览区",
+            "startTime": 1782028800000,
+            "endTime": 1782043200000,
+            "expireTime": 1782029700000,
+            "status": 0,
+            "today": "2026-06-21",
+        }
+
+        reserve = app.public_current_reserve(item, now_ms=1783164938000)
+
+        self.assertEqual(reserve["status_label"], "违约")
+        self.assertEqual(reserve["time_range"], "16:00-20:00")
+
     def test_public_reserve_records_limits_to_recent_ten(self):
         result = {
             "data": {

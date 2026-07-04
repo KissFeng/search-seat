@@ -74,6 +74,23 @@ def millisecond_time(value) -> str:
     return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime("%H:%M")
 
 
+def millisecond_value(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def reserve_status_label(item: dict, now_ms: int = None) -> str:
+    status = item.get("status")
+    if status == 0:
+        current_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        deadline = millisecond_value(item.get("expireTime")) or millisecond_value(item.get("endTime"))
+        if deadline and deadline < current_ms:
+            return "违约"
+    return RESERVE_STATUS_LABELS.get(status, str(status))
+
+
 def timetable_week_num_from_payload(payload: dict) -> str:
     week_num = str(payload.get("week_num") or config.CHAOXING_TIMETABLE_DEFAULT_WEEK).strip()
     if week_num and (not week_num.isdigit() or not 1 <= int(week_num) <= 30):
@@ -102,7 +119,7 @@ def room_label(room_id: str) -> str:
     return str(room_id)
 
 
-def public_current_reserve(item: dict) -> dict:
+def public_current_reserve(item: dict, now_ms: int = None) -> dict:
     room_id = str(item.get("roomId") or "")
     seat_num = str(item.get("seatNum") or "").strip()
     day = str(item.get("today") or "").strip()
@@ -125,7 +142,7 @@ def public_current_reserve(item: dict) -> dict:
         "end_time": end_time,
         "time_range": time_range,
         "status": status,
-        "status_label": RESERVE_STATUS_LABELS.get(status, str(status)),
+        "status_label": reserve_status_label(item, now_ms),
         "reserve_url": local_reserve_path(room_id, day, seat_num) if room_id and day else "",
     }
 
@@ -134,15 +151,17 @@ def public_current_reserves(result: dict) -> list:
     reserves = result.get("data", {}).get("curReserves", [])
     if not isinstance(reserves, list):
         return []
-    return [public_current_reserve(item) for item in reserves if isinstance(item, dict)]
+    now_ms = int(time.time() * 1000)
+    return [public_current_reserve(item, now_ms) for item in reserves if isinstance(item, dict)]
 
 
 def public_reserve_records(result: dict, limit: int = 10) -> list:
     records = result.get("data", {}).get("reserveList", [])
     if not isinstance(records, list):
         return []
+    now_ms = int(time.time() * 1000)
     return [
-        public_current_reserve(item)
+        public_current_reserve(item, now_ms)
         for item in records[:limit]
         if isinstance(item, dict)
     ]
@@ -2518,6 +2537,7 @@ INDEX_HTML = r"""
     }
     .reserve-badge.using { background: var(--available-soft); color: #0a5a3b; }
     .reserve-badge.pending { background: #fff3d1; color: #7b4d0a; }
+    .reserve-badge.violation { background: #ffe8e3; color: var(--danger); }
     .reserve-empty {
       grid-column: 1 / -1;
       border: 1px dashed var(--line);
@@ -3437,7 +3457,8 @@ function stopCurrentReservesRefresh() {
   }
 }
 
-function currentReserveStatusClass(status) {
+function currentReserveStatusClass(status, label = '') {
+  if (label === '违约') return 'violation';
   if (status === 1) return 'using';
   if (status === 0) return 'pending';
   return '';
@@ -3449,7 +3470,7 @@ function renderCurrentReserves(reserves) {
     return;
   }
   currentReserveCards.innerHTML = reserves.map(item => {
-    const badgeClass = currentReserveStatusClass(item.status);
+    const badgeClass = currentReserveStatusClass(item.status, item.status_label);
     const detail = [
       item.room_name || item.room_id,
       item.day,
@@ -3804,7 +3825,8 @@ function renderWatchHistoryRows() {
   renderHistoryControls();
 }
 
-function reserveStatusClass(status) {
+function reserveStatusClass(status, label = '') {
+  if (label === '违约') return 'stop';
   if (status === 1 || status === 2) return 'done';
   if (status === 0) return '';
   return 'stop';
@@ -3813,7 +3835,7 @@ function reserveStatusClass(status) {
 function renderReserveHistoryRows() {
   const visibleRecords = reserveHistoryItems;
   reserveHistoryRows.innerHTML = visibleRecords.map(row => {
-    const statusClass = reserveStatusClass(row.status);
+    const statusClass = reserveStatusClass(row.status, row.status_label);
     return `<tr>
       <td data-label="日期">${escapeHtml(row.day || '-')}</td>
       <td data-label="时段">${escapeHtml(row.time_range || '-')}</td>
@@ -3823,7 +3845,7 @@ function renderReserveHistoryRows() {
     </tr>`;
   }).join('') || '<tr><td colspan="5">暂无预约记录</td></tr>';
   reserveHistoryCards.innerHTML = visibleRecords.map(row => {
-    const statusClass = reserveStatusClass(row.status);
+    const statusClass = reserveStatusClass(row.status, row.status_label);
     return `<article class="mobile-card">
       <div class="mobile-card-head">
         <div>
