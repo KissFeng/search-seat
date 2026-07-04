@@ -1107,24 +1107,24 @@ INDEX_HTML = r"""
       margin: 0;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       font-family: var(--display-font);
-      font-size: clamp(18px, 2vw, 24px);
+      font-size: clamp(16px, 1.7vw, 20px);
       font-weight: 800;
       letter-spacing: 0;
       color: var(--shelf-dark);
     }
     h1::before {
       content: "SEAT";
-      width: 46px;
-      height: 34px;
+      width: 40px;
+      height: 30px;
       display: inline-grid;
       place-items: center;
       border-radius: 6px;
       background: var(--shelf);
       color: #f8fbf5;
-      font: 800 11px/1 var(--mono-font);
-      box-shadow: inset 0 -4px 0 rgba(0, 0, 0, .16);
+      font: 800 10px/1 var(--mono-font);
+      box-shadow: inset 0 -3px 0 rgba(0, 0, 0, .16);
     }
     main {
       position: relative;
@@ -1366,6 +1366,12 @@ INDEX_HTML = r"""
     .consent-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
     #appPanel { padding-bottom: 92px; }
     .app-view.hidden { display: none !important; }
+    .app-view input,
+    .app-view select {
+      min-height: 38px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
     .view-empty {
       display: grid;
       place-items: center;
@@ -1437,8 +1443,8 @@ INDEX_HTML = r"""
     @media (max-width: 820px) {
       body { background-size: 28px 28px, 28px 28px, auto; }
       header { padding: 9px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); align-items: flex-start; min-height: 64px; }
-      h1 { line-height: 40px; font-size: 18px; }
-      h1::before { width: 40px; height: 32px; font-size: 10px; }
+      h1 { line-height: 36px; font-size: 16px; }
+      h1::before { width: 36px; height: 28px; font-size: 9px; }
       #topUser { justify-content: flex-end; gap: 8px; }
       #username { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       main { width: calc(100vw - 16px); padding: 12px 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }

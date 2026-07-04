@@ -251,7 +251,22 @@ public class MainActivity extends Activity {
 
     private void loadUrlFromIntent(Intent intent) {
         String targetUrl = intent == null ? null : intent.getStringExtra("target_url");
-        webView.loadUrl(targetUrl == null || targetUrl.trim().isEmpty() ? HOME_URL : targetUrl);
+        webView.loadUrl(normalizeTargetUrl(targetUrl));
+    }
+
+    private String normalizeTargetUrl(String targetUrl) {
+        if (targetUrl == null || targetUrl.trim().isEmpty()) {
+            return HOME_URL;
+        }
+        String value = targetUrl.trim();
+        Uri uri = Uri.parse(value);
+        if (uri.getScheme() != null) {
+            return value;
+        }
+        if (value.startsWith("/")) {
+            return HOME_URL.replaceAll("/+$", "") + value;
+        }
+        return HOME_URL + value;
     }
 
     private void createNotificationChannel() {
