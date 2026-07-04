@@ -920,6 +920,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/chaoxing/login":
                 self.handle_chaoxing_login()
                 return
+            if path == "/api/chaoxing/timetable":
+                self.handle_chaoxing_timetable()
+                return
             if path == "/api/seats/query":
                 self.handle_seat_query()
                 return
@@ -1471,6 +1474,31 @@ class AppHandler(BaseHTTPRequestHandler):
         response["history_id"] = history_id
 
         self.send_json(200, response)
+
+    def handle_chaoxing_timetable(self):
+        user = self.require_user()
+        if not user:
+            return
+
+        cx = get_chaoxing_session(user["id"])
+        if not cx:
+            self.send_json(409, {"error": "请先登录学习通"})
+            return
+
+        payload = self.read_json()
+        week_num = str(payload.get("week_num") or config.CHAOXING_TIMETABLE_DEFAULT_WEEK).strip()
+        if week_num and (not week_num.isdigit() or not 1 <= int(week_num) <= 30):
+            raise ValueError("周次必须是 1 到 30 之间的数字")
+
+        session = chaoxing.session_from_cookie_json(cx["cookies_json"])
+        try:
+            result = chaoxing.fetch_timetable_response(session, week_num=week_num)
+        except Exception as exc:
+            mark_chaoxing_error(user["id"], str(exc))
+            raise
+
+        update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
+        self.send_json(200, {"ok": True, "timetable": result})
 
 
 ADMIN_HTML = r"""
@@ -2434,9 +2462,9 @@ INDEX_HTML = r"""
       bottom: max(18px, env(safe-area-inset-bottom));
       transform: translateX(-50%);
       z-index: 35;
-      width: min(520px, calc(100vw - 32px));
+      width: min(620px, calc(100vw - 32px));
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 4px;
       padding: 6px;
       border: 1px solid rgba(203, 216, 208, .92);
@@ -2475,6 +2503,47 @@ INDEX_HTML = r"""
       fill: none;
       stroke-linecap: round;
       stroke-linejoin: round;
+    }
+    .json-preview {
+      max-height: 420px;
+      overflow: auto;
+      margin: 14px 0 0;
+      padding: 14px;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: #101915;
+      color: #e6f0ea;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .meta-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .meta-list div {
+      padding: 10px;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: #f8fbf6;
+      min-width: 0;
+    }
+    .meta-list span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .meta-list b {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font-size: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -2561,6 +2630,7 @@ INDEX_HTML = r"""
         padding: 6px 8px max(6px, env(safe-area-inset-bottom));
       }
       .dock-item { min-height: 50px; }
+      .json-preview { max-height: 340px; font-size: 11px; }
     }
   </style>
 </head>
@@ -2650,6 +2720,32 @@ INDEX_HTML = r"""
           </div>
           <div id="seatGrid" class="seat-grid"></div>
           <div id="pairGrid" class="seat-grid pair-grid hidden"></div>
+        </div>
+      </section>
+
+      <section id="timetableSection" class="app-view hidden" data-app-view>
+        <div class="section-head">
+          <h2>课表 JSON</h2>
+          <div class="section-actions">
+            <button class="text-button" id="timetableDownloadBtn" type="button" disabled>下载 JSON</button>
+          </div>
+        </div>
+        <button id="timetableFetchBtn" type="button">获取课表 JSON</button>
+        <div class="message" id="timetableMessage"></div>
+        <div id="timetableEmpty" class="view-empty">
+          <div>
+            <b>还没有课表响应</b>
+            <span>获取后可以直接下载最终 JSON 文件。</span>
+          </div>
+        </div>
+        <div id="timetableContent" class="hidden">
+          <div class="meta-list">
+            <div><span>taskId</span><b id="timetableTaskId">-</b></div>
+            <div><span>parameter</span><b id="timetableParameter">-</b></div>
+            <div><span>tableType</span><b id="timetableTableType">-</b></div>
+            <div><span>课程条目</span><b id="timetableCourseCount">0</b></div>
+          </div>
+          <pre id="timetablePreview" class="json-preview"></pre>
         </div>
       </section>
 
@@ -2772,6 +2868,12 @@ INDEX_HTML = r"""
           </span>
           <span>蹲座</span>
         </button>
+        <button class="dock-item" type="button" data-dock-target="timetableSection" aria-label="课表 JSON">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M8 3v4"></path><path d="M16 3v4"></path><path d="M4 8h16"></path><rect x="4" y="5" width="16" height="16" rx="2"></rect><path d="M8 12h3"></path><path d="M8 16h5"></path></svg>
+          </span>
+          <span>课表</span>
+        </button>
         <button class="dock-item" type="button" data-dock-target="historySection" aria-label="查询历史">
           <span class="dock-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg>
@@ -2876,9 +2978,11 @@ const username = document.querySelector('#username');
 const authForm = document.querySelector('#authForm');
 const queryForm = document.querySelector('#queryForm');
 const watchForm = document.querySelector('#watchForm');
+const timetableFetchBtn = document.querySelector('#timetableFetchBtn');
 const authMessage = document.querySelector('#authMessage');
 const queryMessage = document.querySelector('#queryMessage');
 const watchMessage = document.querySelector('#watchMessage');
+const timetableMessage = document.querySelector('#timetableMessage');
 const cxStatus = document.querySelector('#cxStatus');
 const officialLink = document.querySelector('#officialLink');
 const historyRows = document.querySelector('#historyRows');
@@ -2899,6 +3003,14 @@ const resultsEmpty = document.querySelector('#resultsEmpty');
 const resultsContent = document.querySelector('#resultsContent');
 const seatGrid = document.querySelector('#seatGrid');
 const pairGrid = document.querySelector('#pairGrid');
+const timetableDownloadBtn = document.querySelector('#timetableDownloadBtn');
+const timetableEmpty = document.querySelector('#timetableEmpty');
+const timetableContent = document.querySelector('#timetableContent');
+const timetablePreview = document.querySelector('#timetablePreview');
+const timetableTaskId = document.querySelector('#timetableTaskId');
+const timetableParameter = document.querySelector('#timetableParameter');
+const timetableTableType = document.querySelector('#timetableTableType');
+const timetableCourseCount = document.querySelector('#timetableCourseCount');
 const historyModal = document.querySelector('#historyModal');
 const historyModalClose = document.querySelector('#historyModalClose');
 const historyModalTitle = document.querySelector('#historyModalTitle');
@@ -2927,6 +3039,7 @@ const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 
 const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
 let latestResult = null;
+let latestTimetable = null;
 let officialIndexUrl = '';
 let historyItems = [];
 let watchItems = [];
@@ -3420,6 +3533,36 @@ function renderSeatLists(result, seatTarget, pairTarget) {
   ).join('') || '<div class="muted">没有双人连排</div>';
 }
 
+function renderTimetable(timetable) {
+  latestTimetable = timetable;
+  const response = timetable.response || {};
+  const data = response.data || {};
+  timetableTaskId.textContent = timetable.params?.taskId || '-';
+  timetableParameter.textContent = timetable.api_params?.parameter || timetable.params?.userId || '-';
+  timetableTableType.textContent = timetable.params?.tableType || '-';
+  timetableCourseCount.textContent = Array.isArray(data.data) ? data.data.length : 0;
+  timetablePreview.textContent = JSON.stringify(response, null, 2);
+  timetableEmpty.classList.add('hidden');
+  timetableContent.classList.remove('hidden');
+  timetableDownloadBtn.disabled = false;
+}
+
+function downloadTimetableJson() {
+  if (!latestTimetable?.response) return;
+  const content = JSON.stringify(latestTimetable.response, null, 2);
+  const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const parameter = latestTimetable.api_params?.parameter || latestTimetable.params?.userId || 'unknown';
+  const week = latestTimetable.api_params?.weekNum || 'default';
+  link.href = url;
+  link.download = `chaoxing-timetable-${parameter}-week-${week}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function viewHistory(id) {
   try {
     const data = await api(`/api/history/${id}`, { method: 'GET', headers: {} });
@@ -3619,6 +3762,27 @@ queryForm.addEventListener('submit', async event => {
     setMessage(queryMessage, error.message);
   }
 });
+
+timetableFetchBtn.addEventListener('click', async () => {
+  setMessage(timetableMessage, '正在获取课表...');
+  timetableFetchBtn.disabled = true;
+  timetableDownloadBtn.disabled = true;
+  try {
+    const data = await api('/api/chaoxing/timetable', {
+      method: 'POST',
+      body: '{}'
+    });
+    renderTimetable(data.timetable);
+    setMessage(timetableMessage, '课表 JSON 已获取', true);
+  } catch (error) {
+    setMessage(timetableMessage, error.message);
+    timetableDownloadBtn.disabled = !latestTimetable;
+  } finally {
+    timetableFetchBtn.disabled = false;
+  }
+});
+
+timetableDownloadBtn.addEventListener('click', downloadTimetableJson);
 
 watchForm.addEventListener('submit', async event => {
   event.preventDefault();

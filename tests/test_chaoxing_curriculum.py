@@ -42,6 +42,31 @@ class CurriculumProfileTests(unittest.TestCase):
 
         self.assertEqual(str(ctx.exception), "学习通登录失败：用户名或密码错误")
 
+    def test_parse_timetable_page_params(self):
+        params = chaoxing.parse_timetable_page_params(
+            "https://course.chaoxing.com/svcourse/new/showTable/myTable?"
+            "taskId=134621&type=4&userId=1269250&isMyTable=true&tableType=7"
+        )
+
+        self.assertEqual(
+            params,
+            {
+                "taskId": "134621",
+                "type": "4",
+                "userId": "1269250",
+                "tableType": "7",
+            },
+        )
+
+    def test_parse_timetable_page_params_rejects_missing_user_id(self):
+        with self.assertRaises(ValueError) as ctx:
+            chaoxing.parse_timetable_page_params(
+                "https://course.chaoxing.com/svcourse/new/showTable/myTable?"
+                "taskId=134621&type=4&tableType=7"
+            )
+
+        self.assertEqual(str(ctx.exception), "课表页面缺少 userId 参数")
+
 
 if __name__ == "__main__":
     unittest.main()

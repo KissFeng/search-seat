@@ -4,7 +4,7 @@
 import base64
 import json
 import time
-from urllib.parse import urlencode, unquote
+from urllib.parse import parse_qs, urlencode, unquote, urlparse
 
 import requests
 from Crypto.Cipher import AES
@@ -14,6 +14,8 @@ import config
 
 
 CHAOXING_CURRICULUM_URL = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
+CHAOXING_TIMETABLE_REDIRECT_URL = "https://i.chaoxing.com/wfw/space/redirectUrl"
+CHAOXING_TIMETABLE_API_URL = "https://course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo"
 
 
 class ChaoxingAuthError(RuntimeError):
@@ -51,6 +53,15 @@ def build_curriculum_headers() -> dict:
     }
 
 
+def build_timetable_headers(referer: str) -> dict:
+    return {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": referer,
+    }
+
+
 def parse_curriculum_user_name(result: dict) -> str:
     if not result.get("result"):
         raise RuntimeError(result.get("msg") or "课程接口返回失败")
@@ -70,6 +81,72 @@ def fetch_curriculum_user_name(session: requests.Session) -> str:
     )
     response.raise_for_status()
     return parse_curriculum_user_name(response.json())
+
+
+def build_timetable_entry_url() -> str:
+    return CHAOXING_TIMETABLE_REDIRECT_URL + "?" + urlencode(
+        {
+            "fid": config.CHAOXING_TIMETABLE_FID,
+            "type": config.CHAOXING_TIMETABLE_REDIRECT_TYPE,
+            "mAppId": config.CHAOXING_TIMETABLE_MAPP_ID,
+        }
+    )
+
+
+def parse_timetable_page_params(url: str) -> dict:
+    query = parse_qs(urlparse(url).query)
+    mapping = {
+        "taskId": "taskId",
+        "type": "type",
+        "userId": "userId",
+        "tableType": "tableType",
+    }
+    params = {}
+    for source, target in mapping.items():
+        value = (query.get(source) or [""])[0].strip()
+        if not value:
+            raise ValueError(f"课表页面缺少 {source} 参数")
+        params[target] = value
+    return params
+
+
+def fetch_timetable_response(session: requests.Session, week_num: str = "") -> dict:
+    entry_response = session.get(
+        build_timetable_entry_url(),
+        headers=build_base_headers(),
+        timeout=15,
+        allow_redirects=True,
+    )
+    entry_response.raise_for_status()
+    page_url = entry_response.url
+    page_params = parse_timetable_page_params(page_url)
+    api_params = {
+        "type": page_params["type"],
+        "taskId": page_params["taskId"],
+        "parameter": page_params["userId"],
+        "weekNum": str(week_num or ""),
+        "weeks": "",
+        "custom": "false",
+        "actual": "true",
+        "needShowByCampus": "1",
+        "tableType": page_params["tableType"],
+    }
+    api_response = session.get(
+        CHAOXING_TIMETABLE_API_URL,
+        headers=build_timetable_headers(page_url),
+        params=api_params,
+        timeout=15,
+    )
+    api_response.raise_for_status()
+    result = api_response.json()
+    return {
+        "entry_url": build_timetable_entry_url(),
+        "page_url": page_url,
+        "api_url": api_response.url,
+        "params": page_params,
+        "api_params": api_params,
+        "response": result,
+    }
 
 
 def build_select_url(room_id: str, fid_enc: str, day: str) -> str:
