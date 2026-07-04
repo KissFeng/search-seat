@@ -78,6 +78,8 @@ ROOMS = load_rooms()
 
 SESSION_COOKIE = "search_seat_session"
 SESSION_DAYS = get_int_env("SESSION_DAYS", 7)
+WATCH_INTERVAL_SECONDS = get_int_env("WATCH_INTERVAL_SECONDS", 60)
+NOTIFY_WEBHOOK_URL = get_env("NOTIFY_WEBHOOK_URL")
 
 CHAOXING_SELECT_URL = "https://office.chaoxing.com/front/third/apps/seat/select"
 CHAOXING_USED_SEATS_URL = "https://office.chaoxing.com/data/apps/seat/getusedseatnums"

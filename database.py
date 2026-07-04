@@ -76,6 +76,20 @@ def init_db() -> None:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id BIGINT UNSIGNED NOT NULL,
+                    default_webhook_url TEXT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id),
+                    CONSTRAINT fk_user_settings_user
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS seat_query_history (
                     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                     user_id BIGINT UNSIGNED NOT NULL,
@@ -98,6 +112,38 @@ def init_db() -> None:
                 """
             )
             ensure_column(cursor, "seat_query_history", "result_json", "MEDIUMTEXT NULL")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seat_watch_tasks (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT UNSIGNED NOT NULL,
+                    room_id VARCHAR(64) NOT NULL,
+                    fid_enc VARCHAR(128) NOT NULL,
+                    day DATE NOT NULL,
+                    start_time VARCHAR(5) NOT NULL,
+                    end_time VARCHAR(5) NOT NULL,
+                    target_seats_json TEXT NOT NULL,
+                    ignore_no_power TINYINT(1) NOT NULL DEFAULT 0,
+                    ignore_sunny TINYINT(1) NOT NULL DEFAULT 0,
+                    webhook_url TEXT NULL,
+                    interval_seconds INT UNSIGNED NOT NULL DEFAULT 60,
+                    status VARCHAR(20) NOT NULL DEFAULT 'running',
+                    matched_seats_json TEXT NULL,
+                    last_checked_at DATETIME NULL,
+                    next_check_at DATETIME NULL,
+                    expires_at DATETIME NOT NULL,
+                    last_error TEXT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY idx_seat_watch_tasks_user_created (user_id, created_at),
+                    KEY idx_seat_watch_tasks_due (status, next_check_at),
+                    CONSTRAINT fk_seat_watch_tasks_user
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:

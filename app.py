@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
+import threading
+import time
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import auth
 import chaoxing
 import config
 import database
+import requests
+
+
+WATCH_STATUS_LABELS = {
+    "running": "蹲座中",
+    "matched": "已蹲到",
+    "expired": "已到点",
+    "cancelled": "已取消",
+}
+WATCH_WORKER_STARTED = False
+WATCH_WORKER_LOCK = threading.Lock()
 
 
 def json_default(value):
@@ -71,6 +84,12 @@ def local_reserve_path(room_id: str, day: str, seat: str = "") -> str:
     return "/reserve?" + urlencode(query)
 
 
+def official_seat_index_url(fid_enc: str = "") -> str:
+    return "https://office.chaoxing.com/front/apps/seat/index?" + urlencode(
+        {"fidEnc": fid_enc or config.FID_ENC}
+    )
+
+
 def seat_range(start: int, end: int, width: int) -> set:
     return {str(value).zfill(width) for value in range(start, end + 1)}
 
@@ -98,6 +117,76 @@ def filter_unwanted_seats(room_id: str, available: list, width: int, payload: di
     return [seat for seat in available if seat not in filtered], sorted(filtered & set(available)), applied
 
 
+def truthy(value) -> bool:
+    return value in (True, 1, "1", "true", "on", "yes")
+
+
+def room_seat_config(room: dict) -> tuple:
+    seat_min = int(room.get("seat_min") or config.SEAT_MIN)
+    seat_max = int(room.get("seat_max") or config.SEAT_MAX)
+    seat_width = int(room.get("seat_width") or config.SEAT_WIDTH)
+    if seat_min < 1 or seat_max < seat_min:
+        raise ValueError("座位号范围不正确")
+    if seat_width < 1 or seat_width > 8:
+        raise ValueError("座位号补零宽度不正确")
+    return seat_min, seat_max, seat_width
+
+
+def watch_expires_at(day: str, start_time: str) -> datetime:
+    return datetime.strptime(f"{day} {start_time}", "%Y-%m-%d %H:%M")
+
+
+def validate_watch_interval(value) -> int:
+    try:
+        interval = int(value or config.WATCH_INTERVAL_SECONDS)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("轮询间隔必须是数字") from exc
+    if interval < 15:
+        raise ValueError("轮询间隔不能小于 15 秒")
+    if interval > 3600:
+        raise ValueError("轮询间隔不能大于 3600 秒")
+    return interval
+
+
+def build_seat_response(room: dict, day: str, start_time: str, end_time: str, result: dict, payload: dict) -> dict:
+    room_id = str(room["room_id"])
+    seat_min, seat_max, seat_width = room_seat_config(room)
+    all_seats = chaoxing.build_all_seats(seat_min, seat_max, seat_width)
+    occupied = sorted(chaoxing.get_occupied_seats(result, seat_width))
+    raw_available = chaoxing.get_available_seats(result, all_seats, seat_width)
+    available, filtered_seats, applied_filters = filter_unwanted_seats(room_id, raw_available, seat_width, payload)
+    pairs = chaoxing.find_adjacent_pairs(available, seat_width)
+    return {
+        "room_id": room_id,
+        "room_name": room.get("label") or room_id,
+        "day": day,
+        "start_time": start_time,
+        "end_time": end_time,
+        "reserve_url": local_reserve_path(room_id, day),
+        "available": [
+            {"seat": seat, "url": local_reserve_path(room_id, day, seat)}
+            for seat in available
+        ],
+        "occupied": occupied,
+        "filtered": filtered_seats,
+        "filters": applied_filters,
+        "pairs": [
+            {
+                "seats": pair,
+                "url": local_reserve_path(room_id, day, "-".join(pair)),
+            }
+            for pair in pairs
+        ],
+        "summary": {
+            "total": len(all_seats),
+            "available": len(available),
+            "occupied": len(occupied),
+            "filtered": len(filtered_seats),
+            "pairs": len(pairs),
+        },
+    }
+
+
 def get_chaoxing_session(user_id: int):
     return database.fetch_one(
         """
@@ -107,6 +196,31 @@ def get_chaoxing_session(user_id: int):
         WHERE user_id = %s
         """,
         (user_id,),
+    )
+
+
+def get_user_settings(user_id: int) -> dict:
+    row = database.fetch_one(
+        """
+        SELECT default_webhook_url
+        FROM user_settings
+        WHERE user_id = %s
+        """,
+        (user_id,),
+    )
+    return row or {"default_webhook_url": ""}
+
+
+def save_default_webhook_url(user_id: int, webhook_url: str) -> None:
+    database.execute(
+        """
+        INSERT INTO user_settings (user_id, default_webhook_url)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE
+            default_webhook_url = VALUES(default_webhook_url),
+            updated_at = NOW()
+        """,
+        (user_id, webhook_url),
     )
 
 
@@ -173,6 +287,232 @@ def save_query_history(user_id: int, payload: dict) -> None:
     )
 
 
+def public_watch_task(row: dict) -> dict:
+    matched_seats = loads(row.get("matched_seats_json") or "[]") if row.get("matched_seats_json") else []
+    return {
+        "id": row["id"],
+        "room_id": row["room_id"],
+        "room_name": room_label(row["room_id"]),
+        "day": row["day"],
+        "start_time": row["start_time"],
+        "end_time": row["end_time"],
+        "ignore_no_power": bool(row["ignore_no_power"]),
+        "ignore_sunny": bool(row["ignore_sunny"]),
+        "interval_seconds": row["interval_seconds"],
+        "status": row["status"],
+        "status_label": WATCH_STATUS_LABELS.get(row["status"], row["status"]),
+        "matched_seats": matched_seats,
+        "last_checked_at": row["last_checked_at"],
+        "next_check_at": row["next_check_at"],
+        "expires_at": row["expires_at"],
+        "last_error": row["last_error"],
+        "created_at": row["created_at"],
+    }
+
+
+def fetch_watch_tasks(user_id: int) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT id, user_id, room_id, fid_enc, day, start_time, end_time,
+               target_seats_json, ignore_no_power, ignore_sunny, webhook_url,
+               interval_seconds, status, matched_seats_json, last_checked_at,
+               next_check_at, expires_at, last_error, created_at
+        FROM seat_watch_tasks
+        WHERE user_id = %s
+        ORDER BY id DESC
+        LIMIT 50
+        """,
+        (user_id,),
+    )
+    return [public_watch_task(row) for row in rows]
+
+
+def send_watch_webhook(task: dict, matched_seats: list) -> None:
+    webhook_url = (task.get("webhook_url") or "").strip()
+    if not webhook_url:
+        return
+
+    first_seat = matched_seats[0] if matched_seats else ""
+    reserve_url = chaoxing.build_reserve_url(
+        str(task["room_id"]),
+        str(task["fid_enc"]),
+        str(task["day"]),
+        first_seat,
+    )
+    shown_seats = matched_seats[:30]
+    suffix = f" 等 {len(matched_seats)} 个" if len(matched_seats) > len(shown_seats) else ""
+    message = (
+        "找到可预约座位了\n"
+        f"房间：{room_label(task['room_id'])}\n"
+        f"日期：{task['day']}\n"
+        f"时段：{task['start_time']}-{task['end_time']}\n"
+        f"座位：{', '.join(shown_seats)}{suffix}\n"
+        f"预约页：{reserve_url}"
+    )
+    parsed_url = urlparse(webhook_url)
+    webhook_host = (parsed_url.hostname or "").lower()
+    if webhook_host.endswith(("open.feishu.cn", "open.larksuite.com")):
+        body = {
+            "msg_type": "text",
+            "content": {"text": message},
+        }
+    else:
+        body = {
+            "msgtype": "text",
+            "text": {"content": message},
+            "content": message,
+            "data": {
+                "task_id": task["id"],
+                "room_name": room_label(task["room_id"]),
+                "day": str(task["day"]),
+                "start_time": task["start_time"],
+                "end_time": task["end_time"],
+                "matched_seats": matched_seats,
+                "matched_count": len(matched_seats),
+                "reserve_url": reserve_url,
+            },
+        }
+    response = requests.post(webhook_url, json=body, timeout=10)
+    response.raise_for_status()
+    try:
+        response_body = response.json()
+    except ValueError:
+        return
+    if not isinstance(response_body, dict):
+        return
+
+    result_code = response_body.get("code")
+    if result_code is None:
+        result_code = response_body.get("errcode")
+    if result_code in (None, 0):
+        return
+
+    result_message = response_body.get("msg") or response_body.get("errmsg") or response.text
+    raise RuntimeError(f"Webhook 返回失败：{result_code} {result_message}")
+
+
+def finish_watch_task(task_id: int, status: str, matched_seats=None, error: str = "") -> None:
+    database.execute(
+        """
+        UPDATE seat_watch_tasks
+        SET status = %s,
+            matched_seats_json = %s,
+            last_checked_at = NOW(),
+            next_check_at = NULL,
+            last_error = %s,
+            updated_at = NOW()
+        WHERE id = %s AND status = 'running'
+        """,
+        (
+            status,
+            dumps(matched_seats or [], ensure_ascii=False) if matched_seats else None,
+            error[:2000] if error else None,
+            task_id,
+        ),
+    )
+
+
+def schedule_watch_retry(task_id: int, interval_seconds: int, error: str = "") -> None:
+    next_check_at = datetime.now() + timedelta(seconds=interval_seconds)
+    database.execute(
+        """
+        UPDATE seat_watch_tasks
+        SET last_checked_at = NOW(),
+            next_check_at = %s,
+            last_error = %s,
+            updated_at = NOW()
+        WHERE id = %s AND status = 'running'
+        """,
+        (next_check_at, error[:2000] if error else None, task_id),
+    )
+
+
+def process_watch_task(task: dict) -> None:
+    expires_at = task["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if datetime.now() >= expires_at:
+        finish_watch_task(task["id"], "expired")
+        return
+
+    room = get_room(str(task["room_id"]))
+    session = chaoxing.session_from_cookie_json(task["cookies_json"])
+    result = chaoxing.query_seats(
+        session,
+        str(task["room_id"]),
+        str(task["fid_enc"]),
+        str(task["day"]),
+        task["start_time"],
+        task["end_time"],
+    )
+    if not result.get("success"):
+        schedule_watch_retry(task["id"], int(task["interval_seconds"]), f"学习通接口返回失败：{result}")
+        return
+
+    payload = {
+        "ignore_no_power": bool(task["ignore_no_power"]),
+        "ignore_sunny": bool(task["ignore_sunny"]),
+    }
+    response = build_seat_response(room, str(task["day"]), task["start_time"], task["end_time"], result, payload)
+    update_chaoxing_cookies(task["user_id"], chaoxing.cookie_jar_to_json(session))
+    matched = [item["seat"] for item in response["available"]]
+    if matched:
+        finish_watch_task(task["id"], "matched", matched)
+        try:
+            send_watch_webhook(task, matched)
+        except Exception as exc:
+            database.execute(
+                "UPDATE seat_watch_tasks SET last_error = %s, updated_at = NOW() WHERE id = %s",
+                (f"Webhook 发送失败：{str(exc)[:1800]}", task["id"]),
+            )
+        return
+
+    schedule_watch_retry(task["id"], int(task["interval_seconds"]))
+
+
+def run_due_watch_tasks() -> None:
+    if not WATCH_WORKER_LOCK.acquire(blocking=False):
+        return
+    try:
+        rows = database.fetch_all(
+            """
+            SELECT t.id, t.user_id, t.room_id, t.fid_enc, t.day, t.start_time, t.end_time,
+                   t.ignore_no_power, t.ignore_sunny, t.webhook_url,
+                   t.interval_seconds, t.expires_at, s.cookies_json
+            FROM seat_watch_tasks t
+            JOIN chaoxing_sessions s ON s.user_id = t.user_id
+            WHERE t.status = 'running'
+              AND (t.next_check_at IS NULL OR t.next_check_at <= NOW())
+            ORDER BY t.next_check_at ASC, t.id ASC
+            LIMIT 10
+            """,
+        )
+        for task in rows:
+            try:
+                process_watch_task(task)
+            except Exception as exc:
+                schedule_watch_retry(task["id"], int(task.get("interval_seconds") or config.WATCH_INTERVAL_SECONDS), str(exc))
+    finally:
+        WATCH_WORKER_LOCK.release()
+
+
+def watch_worker_loop() -> None:
+    while True:
+        try:
+            run_due_watch_tasks()
+        except Exception:
+            pass
+        time.sleep(10)
+
+
+def start_watch_worker() -> None:
+    global WATCH_WORKER_STARTED
+    if WATCH_WORKER_STARTED:
+        return
+    WATCH_WORKER_STARTED = True
+    threading.Thread(target=watch_worker_loop, name="seat-watch-worker", daemon=True).start()
+
+
 class AppHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -227,6 +567,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/history":
             self.handle_history()
             return
+        if path == "/api/watch-tasks":
+            self.handle_watch_tasks()
+            return
         if path.startswith("/api/history/"):
             self.handle_history_detail(path)
             return
@@ -261,6 +604,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/history/") and path.endswith("/delete"):
                 self.handle_history_delete(path)
                 return
+            if path == "/api/watch-tasks":
+                self.handle_watch_task_create()
+                return
+            if path.startswith("/api/watch-tasks/") and path.endswith("/cancel"):
+                self.handle_watch_task_cancel(path)
+                return
             self.send_json(404, {"error": "not found"})
         except JSONDecodeError:
             self.send_json(400, {"error": "JSON 格式不正确"})
@@ -276,6 +625,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         cx = get_chaoxing_session(user["id"])
+        settings = get_user_settings(user["id"])
         self.send_json(
             200,
             {
@@ -291,6 +641,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 "defaults": {
                     "rooms": [public_room(room) for room in config.ROOMS],
                     "default_room_id": config.ROOMS[0]["room_id"],
+                    "official_index_url": official_seat_index_url(config.FID_ENC),
+                    "default_webhook_url": settings.get("default_webhook_url") or config.NOTIFY_WEBHOOK_URL or "",
                 },
             },
         )
@@ -364,12 +716,94 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         self.send_json(200, {"ok": True, "deleted": deleted})
 
+    def handle_watch_tasks(self):
+        user = self.require_user()
+        if not user:
+            return
+        self.send_json(200, {"tasks": fetch_watch_tasks(user["id"])})
+
+    def handle_watch_task_create(self):
+        user = self.require_user()
+        if not user:
+            return
+
+        cx = get_chaoxing_session(user["id"])
+        if not cx:
+            self.send_json(409, {"error": "请先登录学习通"})
+            return
+
+        payload = self.read_json()
+        room = get_room(str(payload.get("room_id") or config.ROOMS[0]["room_id"]).strip())
+        room_id = str(room["room_id"])
+        fid_enc = str(room["fid_enc"])
+        day = validate_day(str(payload.get("day", "")).strip())
+        start_time, end_time = validate_time_range(
+            str(payload.get("start_time", "")).strip(),
+            str(payload.get("end_time", "")).strip(),
+        )
+        expires_at = watch_expires_at(day, start_time)
+        if datetime.now() >= expires_at:
+            raise ValueError("蹲座位截止时间已经过去")
+
+        room_seat_config(room)
+        interval_seconds = validate_watch_interval(payload.get("interval_seconds"))
+        webhook_url = str(payload.get("webhook_url") or config.NOTIFY_WEBHOOK_URL or "").strip()
+        if truthy(payload.get("save_webhook")):
+            save_default_webhook_url(user["id"], webhook_url)
+        webhook_url = webhook_url or None
+        task_id = database.execute(
+            """
+            INSERT INTO seat_watch_tasks
+                (user_id, room_id, fid_enc, day, start_time, end_time, target_seats_json,
+                 ignore_no_power, ignore_sunny, webhook_url, interval_seconds,
+                 status, next_check_at, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'running', NOW(), %s)
+            """,
+            (
+                user["id"],
+                room_id,
+                fid_enc,
+                day,
+                start_time,
+                end_time,
+                "[]",
+                1 if truthy(payload.get("ignore_no_power")) else 0,
+                1 if truthy(payload.get("ignore_sunny")) else 0,
+                webhook_url,
+                interval_seconds,
+                expires_at,
+            ),
+        )
+        self.send_json(200, {"ok": True, "task_id": task_id, "tasks": fetch_watch_tasks(user["id"])})
+
+    def handle_watch_task_cancel(self, path: str):
+        user = self.require_user()
+        if not user:
+            return
+        task_id = self.watch_task_id_from_path(path)
+        database.execute(
+            """
+            UPDATE seat_watch_tasks
+            SET status = 'cancelled', next_check_at = NULL, updated_at = NOW()
+            WHERE id = %s AND user_id = %s AND status = 'running'
+            """,
+            (task_id, user["id"]),
+        )
+        self.send_json(200, {"ok": True, "tasks": fetch_watch_tasks(user["id"])})
+
     def history_id_from_path(self, path: str) -> int:
         parts = [part for part in path.split("/") if part]
         try:
             return int(parts[2])
         except (IndexError, ValueError) as exc:
             raise ValueError("查询记录 ID 不正确") from exc
+
+    def watch_task_id_from_path(self, path: str) -> int:
+        parts = [part for part in path.split("/") if part]
+        try:
+            return int(parts[2])
+        except (IndexError, ValueError) as exc:
+            raise ValueError("蹲座位任务 ID 不正确") from exc
 
     def handle_chaoxing_login(self):
         payload = self.read_json()
@@ -408,13 +842,7 @@ class AppHandler(BaseHTTPRequestHandler):
             str(payload.get("start_time", "")).strip(),
             str(payload.get("end_time", "")).strip(),
         )
-        seat_min = int(room.get("seat_min") or config.SEAT_MIN)
-        seat_max = int(room.get("seat_max") or config.SEAT_MAX)
-        seat_width = int(room.get("seat_width") or config.SEAT_WIDTH)
-        if seat_min < 1 or seat_max < seat_min:
-            raise ValueError("座位号范围不正确")
-        if seat_width < 1 or seat_width > 8:
-            raise ValueError("座位号补零宽度不正确")
+        room_seat_config(room)
 
         session = chaoxing.session_from_cookie_json(cx["cookies_json"])
         try:
@@ -428,41 +856,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": "学习通接口返回失败", "raw": result})
             return
 
-        all_seats = chaoxing.build_all_seats(seat_min, seat_max, seat_width)
-        occupied = sorted(chaoxing.get_occupied_seats(result, seat_width))
-        raw_available = chaoxing.get_available_seats(result, all_seats, seat_width)
-        available, filtered_seats, applied_filters = filter_unwanted_seats(room_id, raw_available, seat_width, payload)
-        pairs = chaoxing.find_adjacent_pairs(available, seat_width)
+        response = build_seat_response(room, day, start_time, end_time, result, payload)
         update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
-        response = {
-            "room_id": room_id,
-            "room_name": room.get("label") or room_id,
-            "day": day,
-            "start_time": start_time,
-            "end_time": end_time,
-            "reserve_url": local_reserve_path(room_id, day),
-            "available": [
-                {"seat": seat, "url": local_reserve_path(room_id, day, seat)}
-                for seat in available
-            ],
-            "occupied": occupied,
-            "filtered": filtered_seats,
-            "filters": applied_filters,
-            "pairs": [
-                {
-                    "seats": pair,
-                    "url": local_reserve_path(room_id, day, "-".join(pair)),
-                }
-                for pair in pairs
-            ],
-            "summary": {
-                "total": len(all_seats),
-                "available": len(available),
-                "occupied": len(occupied),
-                "filtered": len(filtered_seats),
-                "pairs": len(pairs),
-            },
-        }
         history_id = save_query_history(
             user["id"],
             {
@@ -471,9 +866,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 "day": day,
                 "start_time": start_time,
                 "end_time": end_time,
-                "available_count": len(available),
-                "occupied_count": len(occupied),
-                "pair_count": len(pairs),
+                "available_count": response["summary"]["available"],
+                "occupied_count": response["summary"]["occupied"],
+                "pair_count": response["summary"]["pairs"],
                 "result_json": dumps(response, ensure_ascii=False),
             },
         )
@@ -492,22 +887,23 @@ INDEX_HTML = r"""
   <style>
     :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #f3f5f7; color: #172033; }
-    header { height: 56px; background: #ffffff; border-bottom: 1px solid #dfe4ea; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; }
+    html { width: 100%; overflow-x: hidden; }
+    body { margin: 0; background: #f3f5f7; color: #172033; overflow-x: hidden; }
+    header { min-height: 56px; background: #ffffff; border-bottom: 1px solid #dfe4ea; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 22px; padding-left: max(22px, env(safe-area-inset-left)); padding-right: max(22px, env(safe-area-inset-right)); }
     h1 { margin: 0; font-size: 18px; font-weight: 700; }
-    main { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; padding: 20px 0; }
+    main { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; padding: 20px 0; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
     section { background: #fff; border: 1px solid #dfe4ea; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
     h2 { margin: 0 0 14px; font-size: 16px; }
     form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: end; }
     label { display: grid; gap: 6px; color: #4b5563; font-size: 13px; }
-    input, select { width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 10px; font-size: 14px; color: #111827; background: #fff; }
-    button, .button-link { border: 0; border-radius: 6px; background: #0f766e; color: #fff; padding: 10px 14px; font-size: 14px; cursor: pointer; text-decoration: none; text-align: center; display: inline-flex; align-items: center; justify-content: center; min-height: 38px; }
+    input, select { width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 10px; font-size: 16px; color: #111827; background: #fff; min-height: 40px; }
+    button, .button-link { border: 0; border-radius: 6px; background: #0f766e; color: #fff; padding: 10px 14px; font-size: 14px; cursor: pointer; text-decoration: none; text-align: center; display: inline-flex; align-items: center; justify-content: center; min-height: 40px; }
     button.secondary { background: #334155; }
     button.ghost { background: transparent; color: #334155; border: 1px solid #cbd5e1; }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .auth { max-width: 520px; margin: 40px auto; }
     .auth form { grid-template-columns: 1fr; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; min-width: 0; }
     .muted { color: #64748b; font-size: 13px; }
     .ok { color: #166534; }
     .bad { color: #b91c1c; }
@@ -532,9 +928,13 @@ INDEX_HTML = r"""
     .message { min-height: 20px; margin: 10px 0 0; font-size: 13px; }
     .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
     .section-head h2 { margin: 0; }
+    .section-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .table-actions { display: inline-flex; gap: 8px; align-items: center; white-space: nowrap; }
     .text-button { min-height: 0; padding: 5px 8px; border: 1px solid #cbd5e1; background: #fff; color: #0f172a; font-size: 12px; }
     .text-button.danger { color: #b91c1c; border-color: #fecaca; }
+    .status-pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; background: #e0f2fe; color: #075985; font-size: 12px; white-space: nowrap; }
+    .status-pill.done { background: #dcfce7; color: #166534; }
+    .status-pill.stop { background: #f1f5f9; color: #475569; }
     .check-cell { width: 38px; text-align: center; }
     .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 22px; background: rgba(15, 23, 42, .42); }
     .modal-panel { width: min(1120px, 100%); max-height: min(780px, calc(100vh - 44px)); overflow: auto; background: #fff; border-radius: 8px; border: 1px solid #cbd5e1; box-shadow: 0 24px 80px rgba(15, 23, 42, .24); padding: 18px; }
@@ -542,17 +942,41 @@ INDEX_HTML = r"""
     .modal-head h2 { margin: 0 0 6px; }
     .modal-empty { border: 1px solid #fde68a; background: #fffbeb; color: #92400e; border-radius: 8px; padding: 14px; }
     @media (max-width: 820px) {
-      header { padding: 0 14px; }
-      main { width: calc(100vw - 20px); padding: 12px 0; }
-      form, .stats { grid-template-columns: 1fr; }
+      header { padding: 8px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); align-items: flex-start; }
+      h1 { line-height: 40px; }
+      #topUser { justify-content: flex-end; gap: 8px; }
+      #username { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      main { width: calc(100vw - 16px); padding: 10px 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+      section { padding: 14px; margin-bottom: 10px; }
+      form { grid-template-columns: 1fr; gap: 10px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .stat { padding: 10px; }
+      .stat b { font-size: 18px; }
       .wide { grid-column: span 1; }
       .statusbar { grid-template-columns: 1fr; }
-      .section-head { align-items: flex-start; flex-direction: column; }
-      table { display: block; overflow-x: auto; }
-      .seat-grid { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
-      .pair-grid { grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); }
-      .modal { padding: 10px; }
-      .modal-panel { max-height: calc(100vh - 20px); padding: 14px; }
+      .button-link, form > button { width: 100%; }
+      .section-head { align-items: stretch; flex-direction: row; }
+      .section-head h2 { align-self: center; }
+      .section-actions { justify-content: flex-end; }
+      .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .tab { width: 100%; padding-left: 8px; padding-right: 8px; }
+      .seat-grid { grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 6px; }
+      .pair-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+      .seat, .pair { padding: 9px 6px; min-height: 38px; }
+      .responsive-table, .responsive-table tbody, .responsive-table tr, .responsive-table td { display: block; width: 100%; }
+      .responsive-table thead { display: none; }
+      .responsive-table tr { border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; padding: 8px 10px; margin-bottom: 10px; }
+      .responsive-table td { border-bottom: 1px solid #f1f5f9; padding: 8px 0; font-size: 13px; }
+      .responsive-table td:last-child { border-bottom: 0; }
+      .responsive-table td::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #64748b; font-size: 12px; font-weight: 600; }
+      .responsive-table td[data-label=""]::before { display: none; }
+      .responsive-table td[colspan] { color: #64748b; }
+      .responsive-table td[colspan]::before { display: none; }
+      .check-cell { width: auto; text-align: left; }
+      .table-actions { display: flex; gap: 8px; }
+      .table-actions .text-button { flex: 1; }
+      .modal { padding: 0; align-items: stretch; }
+      .modal-panel { width: 100%; max-height: 100vh; border-radius: 0; border-left: 0; border-right: 0; padding: 14px; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
       .modal-head { flex-direction: column; }
     }
   </style>
@@ -640,10 +1064,53 @@ INDEX_HTML = r"""
 
       <section>
         <div class="section-head">
-          <h2>查询历史</h2>
-          <button class="text-button danger" id="deleteSelectedHistoryBtn" type="button">删除选中</button>
+          <h2>蹲座位</h2>
+          <div class="section-actions">
+            <button class="text-button" id="refreshWatchBtn" type="button">刷新</button>
+            <button class="text-button" id="toggleWatchBtn" type="button">显示全部</button>
+          </div>
         </div>
-        <table>
+        <form id="watchForm">
+          <label>轮询间隔
+            <input name="interval_seconds" type="number" min="15" max="3600" value="60" required>
+          </label>
+          <label class="wide">Webhook
+            <input name="webhook_url" type="url" placeholder="https://">
+          </label>
+          <label class="row wide">
+            <input name="save_webhook" type="checkbox" style="width: auto;">
+            <span>保存 Webhook，下次自动填入</span>
+          </label>
+          <button type="submit">开启蹲座位</button>
+        </form>
+        <div class="message" id="watchMessage"></div>
+        <table class="responsive-table">
+          <thead>
+            <tr>
+              <th>创建时间</th>
+              <th>日期</th>
+              <th>时段</th>
+              <th>房间</th>
+              <th>筛选</th>
+              <th>状态</th>
+              <th>上次检查</th>
+              <th>命中座位</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="watchRows"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>查询历史</h2>
+          <div class="section-actions">
+            <button class="text-button" id="toggleHistoryBtn" type="button">显示全部</button>
+            <button class="text-button danger" id="deleteSelectedHistoryBtn" type="button">删除选中</button>
+          </div>
+        </div>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th class="check-cell"><input id="historySelectAll" type="checkbox"></th>
@@ -698,13 +1165,19 @@ const topUser = document.querySelector('#topUser');
 const username = document.querySelector('#username');
 const authForm = document.querySelector('#authForm');
 const queryForm = document.querySelector('#queryForm');
+const watchForm = document.querySelector('#watchForm');
 const authMessage = document.querySelector('#authMessage');
 const queryMessage = document.querySelector('#queryMessage');
+const watchMessage = document.querySelector('#watchMessage');
 const cxStatus = document.querySelector('#cxStatus');
 const officialLink = document.querySelector('#officialLink');
 const historyRows = document.querySelector('#historyRows');
+const watchRows = document.querySelector('#watchRows');
 const historySelectAll = document.querySelector('#historySelectAll');
 const deleteSelectedHistoryBtn = document.querySelector('#deleteSelectedHistoryBtn');
+const refreshWatchBtn = document.querySelector('#refreshWatchBtn');
+const toggleHistoryBtn = document.querySelector('#toggleHistoryBtn');
+const toggleWatchBtn = document.querySelector('#toggleWatchBtn');
 const resultsPanel = document.querySelector('#resultsPanel');
 const seatGrid = document.querySelector('#seatGrid');
 const pairGrid = document.querySelector('#pairGrid');
@@ -717,7 +1190,13 @@ const historyModalContent = document.querySelector('#historyModalContent');
 const modalSeatGrid = document.querySelector('#modalSeatGrid');
 const modalPairGrid = document.querySelector('#modalPairGrid');
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
+const DEFAULT_HISTORY_LIMIT = 3;
 let latestResult = null;
+let officialIndexUrl = '';
+let historyItems = [];
+let watchItems = [];
+let showAllHistory = false;
+let showAllWatch = false;
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -775,6 +1254,9 @@ function fillDefaults(defaults) {
   ).join('');
   queryForm.room_id.innerHTML = roomOptions;
   queryForm.room_id.value = defaults.default_room_id;
+  watchForm.webhook_url.value = defaults.default_webhook_url || '';
+  watchForm.save_webhook.checked = Boolean(defaults.default_webhook_url);
+  officialIndexUrl = defaults.official_index_url || '';
   updateOfficialLink();
 }
 
@@ -800,12 +1282,7 @@ function renderMe(data) {
 }
 
 function updateOfficialLink() {
-  const day = queryForm.day.value || today();
-  const params = new URLSearchParams({
-    room_id: queryForm.room_id.value,
-    day
-  });
-  officialLink.href = `/reserve?${params.toString()}`;
+  officialLink.href = officialIndexUrl || '#';
 }
 
 async function loadMe() {
@@ -815,21 +1292,67 @@ async function loadMe() {
 
 async function loadHistory() {
   const data = await api('/api/history', { method: 'GET', headers: {} });
-  historyRows.innerHTML = data.history.map(row => `<tr>
-    <td class="check-cell"><input class="history-check" type="checkbox" value="${row.id}"></td>
-    <td>${escapeHtml(row.created_at)}</td>
-    <td>${escapeHtml(row.day)}</td>
-    <td>${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
-    <td>${escapeHtml(row.room_name || row.room_id)}</td>
-    <td>${row.available_count}</td>
-    <td>${row.occupied_count}</td>
-    <td>${row.pair_count}</td>
-    <td><span class="table-actions">
+  historyItems = data.history || [];
+  renderHistoryRows();
+}
+
+function renderHistoryRows() {
+  const visibleHistory = showAllHistory ? historyItems : historyItems.slice(0, DEFAULT_HISTORY_LIMIT);
+  historyRows.innerHTML = visibleHistory.map(row => `<tr>
+    <td class="check-cell" data-label="选择"><input class="history-check" type="checkbox" value="${row.id}"></td>
+    <td data-label="时间">${escapeHtml(row.created_at)}</td>
+    <td data-label="日期">${escapeHtml(row.day)}</td>
+    <td data-label="时段">${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+    <td data-label="房间">${escapeHtml(row.room_name || row.room_id)}</td>
+    <td data-label="可预约">${row.available_count}</td>
+    <td data-label="已占用">${row.occupied_count}</td>
+    <td data-label="连排">${row.pair_count}</td>
+    <td data-label="操作"><span class="table-actions">
       <button class="text-button" type="button" onclick="viewHistory(${row.id})">查看</button>
       <button class="text-button danger" type="button" onclick="deleteHistory(${row.id})">删除</button>
     </span></td>
   </tr>`).join('') || '<tr><td colspan="9">暂无记录</td></tr>';
   historySelectAll.checked = false;
+  toggleHistoryBtn.classList.toggle('hidden', historyItems.length <= DEFAULT_HISTORY_LIMIT);
+  toggleHistoryBtn.textContent = showAllHistory ? '收起' : `显示全部 ${historyItems.length} 条`;
+}
+
+async function loadWatchTasks() {
+  const data = await api('/api/watch-tasks', { method: 'GET', headers: {} });
+  watchItems = data.tasks || [];
+  renderWatchRows();
+}
+
+function renderWatchRows() {
+  const visibleWatch = showAllWatch ? watchItems : watchItems.slice(0, DEFAULT_HISTORY_LIMIT);
+  watchRows.innerHTML = visibleWatch.map(row => {
+    const statusClass = row.status === 'matched' ? 'done' : row.status === 'running' ? '' : 'stop';
+    const actions = row.status === 'running'
+      ? `<button class="text-button danger" type="button" onclick="cancelWatchTask(${row.id})">取消</button>`
+      : '';
+    const error = row.last_error ? `<div class="bad">${escapeHtml(row.last_error)}</div>` : '';
+    const filters = [
+      row.ignore_no_power ? '忽略无电源' : '',
+      row.ignore_sunny ? '忽略太阳晒' : ''
+    ].filter(Boolean).join('，') || '无';
+    const matched = row.matched_seats || [];
+    const matchedText = matched.length > 20
+      ? `${matched.slice(0, 20).join(', ')} 等 ${matched.length} 个`
+      : matched.join(', ');
+    return `<tr>
+      <td data-label="创建时间">${escapeHtml(row.created_at)}</td>
+      <td data-label="日期">${escapeHtml(row.day)}</td>
+      <td data-label="时段">${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+      <td data-label="房间">${escapeHtml(row.room_name || row.room_id)}</td>
+      <td data-label="筛选">${escapeHtml(filters)}</td>
+      <td data-label="状态"><span class="status-pill ${statusClass}">${escapeHtml(row.status_label)}</span>${error}</td>
+      <td data-label="上次检查">${escapeHtml(row.last_checked_at || '')}</td>
+      <td data-label="命中座位">${escapeHtml(matchedText)}</td>
+      <td data-label="操作"><span class="table-actions">${actions}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9">暂无任务</td></tr>';
+  toggleWatchBtn.classList.toggle('hidden', watchItems.length <= DEFAULT_HISTORY_LIMIT);
+  toggleWatchBtn.textContent = showAllWatch ? '收起' : `显示全部 ${watchItems.length} 条`;
 }
 
 function renderResults(result) {
@@ -923,6 +1446,18 @@ async function deleteSelectedHistory() {
   }
 }
 
+async function cancelWatchTask(id) {
+  if (!window.confirm('确定取消这个蹲座位任务吗？')) return;
+  try {
+    const data = await api(`/api/watch-tasks/${id}/cancel`, { method: 'POST', body: '{}' });
+    watchRows.innerHTML = '';
+    await loadWatchTasks();
+    setMessage(watchMessage, '已取消', true);
+  } catch (error) {
+    setMessage(watchMessage, error.message);
+  }
+}
+
 function setTab(tab) {
   document.querySelectorAll('.tab').forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
   seatGrid.classList.toggle('hidden', tab !== 'seats');
@@ -950,6 +1485,7 @@ authForm.addEventListener('submit', async event => {
     setMessage(authMessage, '', true);
     await loadMe();
     await loadHistory();
+    await loadWatchTasks();
   } catch (error) {
     setMessage(authMessage, error.message);
   }
@@ -973,6 +1509,22 @@ historyRows.addEventListener('change', event => {
 });
 
 deleteSelectedHistoryBtn.addEventListener('click', deleteSelectedHistory);
+toggleHistoryBtn.addEventListener('click', () => {
+  showAllHistory = !showAllHistory;
+  renderHistoryRows();
+});
+toggleWatchBtn.addEventListener('click', () => {
+  showAllWatch = !showAllWatch;
+  renderWatchRows();
+});
+refreshWatchBtn.addEventListener('click', async () => {
+  try {
+    await loadWatchTasks();
+    setMessage(watchMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(watchMessage, error.message);
+  }
+});
 
 queryForm.addEventListener('input', updateOfficialLink);
 queryForm.addEventListener('change', event => {
@@ -1001,6 +1553,33 @@ queryForm.addEventListener('submit', async event => {
   }
 });
 
+watchForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!queryForm.start_time.value || !queryForm.end_time.value) {
+    setMessage(watchMessage, '请选择开始时间和结束时间');
+    return;
+  }
+  if (queryForm.end_time.value <= queryForm.start_time.value) {
+    setMessage(watchMessage, '结束时间必须晚于开始时间');
+    return;
+  }
+  const queryPayload = Object.fromEntries(new FormData(queryForm).entries());
+  const watchPayload = Object.fromEntries(new FormData(watchForm).entries());
+  const payload = { ...queryPayload, ...watchPayload };
+  setMessage(watchMessage, '正在创建任务...');
+  try {
+    const data = await api('/api/watch-tasks', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    watchRows.innerHTML = '';
+    await loadWatchTasks();
+    setMessage(watchMessage, '蹲座位任务已开启', true);
+  } catch (error) {
+    setMessage(watchMessage, error.message);
+  }
+});
+
 document.querySelectorAll('[data-tab]').forEach(button => {
   button.addEventListener('click', () => setTab(button.dataset.tab));
 });
@@ -1023,6 +1602,7 @@ setTimeOptions();
 loadMe().then(async data => {
   if (!authPanel.classList.contains('hidden')) return;
   await loadHistory();
+  await loadWatchTasks();
 }).catch(() => {});
 </script>
 </body>
@@ -1033,6 +1613,7 @@ loadMe().then(async data => {
 def main() -> None:
     config.ensure_secret()
     database.init_db()
+    start_watch_worker()
     server = ThreadingHTTPServer((config.APP_HOST, config.APP_PORT), AppHandler)
     print(f"Search Seat 已启动：http://127.0.0.1:{config.APP_PORT}")
     server.serve_forever()
