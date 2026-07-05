@@ -152,6 +152,26 @@ def init_db() -> None:
             )
             ensure_column(cursor, "seat_watch_tasks", "reminder_ack_at", "DATETIME NULL")
             ensure_column(cursor, "seat_watch_tasks", "reminder_action", "VARCHAR(20) NULL")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_versions (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    platform VARCHAR(20) NOT NULL,
+                    version_code INT UNSIGNED NOT NULL,
+                    version_name VARCHAR(64) NOT NULL,
+                    apk_filename VARCHAR(255) NOT NULL,
+                    apk_size BIGINT UNSIGNED NOT NULL,
+                    apk_sha256 CHAR(64) NOT NULL,
+                    release_notes TEXT NULL,
+                    force_update TINYINT(1) NOT NULL DEFAULT 0,
+                    published TINYINT(1) NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_app_versions_platform_code (platform, version_code),
+                    KEY idx_app_versions_latest (platform, published, version_code)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:

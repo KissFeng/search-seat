@@ -4,11 +4,13 @@
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
+import hashlib
 import hmac
+import os
 import queue
 import threading
 import time
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import auth
 import chaoxing
@@ -41,6 +43,52 @@ def json_default(value):
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
+
+
+def android_version_code_from_params(params: dict) -> int:
+    raw = (params.get("version_code") or [""])[0]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("version_code 必须是正整数") from exc
+    if value <= 0:
+        raise ValueError("version_code 必须是正整数")
+    return value
+
+
+def safe_apk_filename(filename: str) -> str:
+    name = os.path.basename(str(filename or "").strip())
+    if not name or name in {".", ".."} or name != str(filename or "").strip():
+        raise ValueError("APK 文件名不正确")
+    if not name.lower().endswith(".apk"):
+        raise ValueError("只支持上传 APK 文件")
+    return name
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def public_app_version(row: dict, base_url: str) -> dict:
+    filename = safe_apk_filename(row["apk_filename"])
+    return {
+        "id": row.get("id"),
+        "platform": row.get("platform", "android"),
+        "version_code": int(row["version_code"]),
+        "version_name": row["version_name"],
+        "force_update": bool(row.get("force_update")),
+        "apk_url": f"{base_url.rstrip('/')}/downloads/apks/{quote(filename)}",
+        "apk_size": int(row["apk_size"]),
+        "apk_sha256": row["apk_sha256"],
+        "release_notes": row.get("release_notes") or "",
+        "created_at": row.get("created_at"),
+    }
+
+
+def app_update_payload(row: dict, current_version_code: int, base_url: str) -> dict:
+    if not row or int(row["version_code"]) <= int(current_version_code):
+        return {"update": False}
+    return {"update": True, **public_app_version(row, base_url)}
 
 
 def validate_day(value: str) -> str:

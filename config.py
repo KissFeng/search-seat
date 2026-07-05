@@ -37,6 +37,7 @@ def get_int_env(name: str, default: int) -> int:
         return default
 
 
+APK_UPLOAD_DIR = Path(get_env("APK_UPLOAD_DIR", str(BASE_DIR / "uploads" / "apks")))
 APP_HOST = get_env("APP_HOST", "0.0.0.0")
 APP_PORT = get_int_env("PORT", 8000)
 APP_SECRET = get_env("APP_SECRET", "dev-secret-change-me")
