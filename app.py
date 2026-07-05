@@ -37,6 +37,11 @@ WATCH_WORKER_STARTED = False
 WATCH_WORKER_LOCK = threading.Lock()
 WATCH_ALERT_SUBSCRIBERS = {}
 WATCH_ALERT_SUBSCRIBERS_LOCK = threading.Lock()
+GETUI_TOKEN_LOCK = threading.Lock()
+GETUI_TOKEN = ""
+GETUI_TOKEN_EXPIRE_MS = 0
+GETUI_WATCH_NOTIFICATION_CHANNEL_ID = "seat_match_alerts_v3"
+GETUI_ADMIN_NOTIFICATION_CHANNEL_ID = "admin_messages_v1"
 
 
 def json_default(value):
@@ -277,6 +282,24 @@ def public_room(room: dict) -> dict:
         "label": room["label"],
         "room_id": room["room_id"],
     }
+
+
+def public_chaoxing_cookie_payload(cookies_json: str) -> dict:
+    cookies = []
+    for item in loads(cookies_json or "[]"):
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": str(item.get("value") or ""),
+                "domain": str(item.get("domain") or ""),
+                "path": str(item.get("path") or "/") or "/",
+                "secure": bool(item.get("secure")),
+            }
+        )
+    return {"ok": True, "cookies": cookies}
 
 
 def get_room(room_id: str) -> dict:
@@ -609,9 +632,69 @@ def public_admin_user(row: dict) -> dict:
         "query_count": int(row.get("query_count") or 0),
         "watch_count": int(row.get("watch_count") or 0),
         "running_watch_count": int(row.get("running_watch_count") or 0),
+        "push_device_count": int(row.get("push_device_count") or 0),
         "last_query_at": row.get("last_query_at") or "",
         "last_watch_at": row.get("last_watch_at") or "",
     }
+
+
+def fetch_current_reserves_from_cookies(user_id: int, cookies_json: str) -> dict:
+    session = chaoxing.session_from_cookie_json(cookies_json)
+    try:
+        result = chaoxing.fetch_seat_index(session, config.FID_ENC)
+    except Exception as exc:
+        mark_chaoxing_error(user_id, str(exc))
+        return {"reserves": [], "error": str(exc)}
+
+    if not result.get("success"):
+        mark_chaoxing_error(user_id, str(result))
+        return {"reserves": [], "error": "学习通预约接口返回失败"}
+
+    update_chaoxing_cookies(user_id, chaoxing.cookie_jar_to_json(session))
+    return {"reserves": public_current_reserves(result), "error": ""}
+
+
+def public_admin_users_with_current_reserves(rows: list) -> list:
+    users = []
+    for row in rows:
+        user = public_admin_user(row)
+        cookies_json = row.get("cookies_json") or ""
+        if cookies_json:
+            current = fetch_current_reserves_from_cookies(user["id"], cookies_json)
+        else:
+            current = {"reserves": [], "error": "未绑定学习通"}
+        user["current_reserves"] = current.get("reserves") or []
+        user["current_reserves_error"] = current.get("error") or ""
+        users.append(user)
+    return users
+
+
+def public_admin_user_current_reserves(row: dict) -> dict:
+    user_id = int(row.get("id") or row.get("user_id") or 0)
+    cookies_json = row.get("cookies_json") or ""
+    if cookies_json:
+        current = fetch_current_reserves_from_cookies(user_id, cookies_json)
+    else:
+        current = {"reserves": [], "error": "未绑定学习通"}
+    return {
+        "user_id": user_id,
+        "current_reserves": current.get("reserves") or [],
+        "current_reserves_error": current.get("error") or "",
+    }
+
+
+def fetch_admin_current_reserve_rows(limit: int = 500) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT u.id, s.cookies_json
+        FROM users u
+        LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
+        ORDER BY u.id ASC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return [public_admin_user_current_reserves(row) for row in rows]
 
 
 def fetch_admin_user_rows(limit: int = 500) -> list:
@@ -625,7 +708,8 @@ def fetch_admin_user_rows(limit: int = 500) -> list:
                q.last_query_at,
                COALESCE(w.watch_count, 0) AS watch_count,
                COALESCE(w.running_watch_count, 0) AS running_watch_count,
-               w.last_watch_at
+               w.last_watch_at,
+               COALESCE(pd.push_device_count, 0) AS push_device_count
         FROM users u
         LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
         LEFT JOIN (
@@ -641,6 +725,12 @@ def fetch_admin_user_rows(limit: int = 500) -> list:
             FROM seat_watch_tasks
             GROUP BY user_id
         ) w ON w.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS push_device_count
+            FROM push_devices
+            WHERE enabled = 1
+            GROUP BY user_id
+        ) pd ON pd.user_id = u.id
         ORDER BY u.id ASC
         LIMIT %s
         """,
@@ -660,7 +750,8 @@ def fetch_admin_user(user_id: int):
                q.last_query_at,
                COALESCE(w.watch_count, 0) AS watch_count,
                COALESCE(w.running_watch_count, 0) AS running_watch_count,
-               w.last_watch_at
+               w.last_watch_at,
+               COALESCE(pd.push_device_count, 0) AS push_device_count
         FROM users u
         LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
         LEFT JOIN (
@@ -676,6 +767,12 @@ def fetch_admin_user(user_id: int):
             FROM seat_watch_tasks
             GROUP BY user_id
         ) w ON w.user_id = u.id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS push_device_count
+            FROM push_devices
+            WHERE enabled = 1
+            GROUP BY user_id
+        ) pd ON pd.user_id = u.id
         WHERE u.id = %s
         """,
         (user_id,),
@@ -690,6 +787,492 @@ def admin_summary(users: list) -> dict:
         "queries": sum(int(user.get("query_count") or 0) for user in users),
         "watch_tasks": sum(int(user.get("watch_count") or 0) for user in users),
     }
+
+
+def chat_message_text_from_payload(payload: dict) -> str:
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        raise ValueError("请输入聊天内容")
+    if len(content) > 500:
+        raise ValueError("聊天内容不能超过 500 字")
+    return content
+
+
+def public_chat_message(row: dict) -> dict:
+    author_name = str(row.get("cx_user_name") or "").strip() or str(row.get("username") or "").strip() or "匿名用户"
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "author_name": author_name,
+        "avatar": "default",
+        "content": row.get("content") or "",
+        "created_at": row.get("created_at") or "",
+    }
+
+
+def getui_configured() -> bool:
+    return bool(config.GETUI_APP_ID and config.GETUI_APP_KEY and config.GETUI_MASTER_SECRET)
+
+
+def public_push_device(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "platform": row.get("platform") or "android",
+        "cid": row.get("cid") or "",
+        "device_name": row.get("device_name") or "",
+        "sdk_version": row.get("sdk_version") or "",
+        "app_version_code": row.get("app_version_code"),
+        "app_version_name": row.get("app_version_name") or "",
+        "notifications_enabled": bool(row.get("notifications_enabled")),
+        "enabled": bool(row.get("enabled")),
+        "last_seen_at": row.get("last_seen_at") or "",
+    }
+
+
+def save_push_device(user_id: int, payload: dict) -> dict:
+    cid = str(payload.get("cid") or "").strip()
+    if not cid:
+        raise ValueError("缺少个推 CID")
+    if len(cid) > 128:
+        raise ValueError("个推 CID 过长")
+
+    platform = str(payload.get("platform") or "android").strip().lower()[:20] or "android"
+    device_name = str(payload.get("device_name") or "").strip()[:255] or None
+    sdk_version = str(payload.get("sdk_version") or "").strip()[:64] or None
+    app_version_name = str(payload.get("app_version_name") or "").strip()[:64] or None
+    try:
+        app_version_code = int(payload.get("app_version_code") or 0) or None
+    except (TypeError, ValueError):
+        app_version_code = None
+    notifications_enabled = 1 if truthy(payload.get("notifications_enabled", True)) else 0
+
+    database.execute(
+        """
+        INSERT INTO push_devices
+            (user_id, platform, cid, device_name, sdk_version, app_version_code,
+             app_version_name, notifications_enabled, enabled, last_seen_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, NOW())
+        ON DUPLICATE KEY UPDATE
+            user_id = VALUES(user_id),
+            platform = VALUES(platform),
+            device_name = VALUES(device_name),
+            sdk_version = VALUES(sdk_version),
+            app_version_code = VALUES(app_version_code),
+            app_version_name = VALUES(app_version_name),
+            notifications_enabled = VALUES(notifications_enabled),
+            enabled = 1,
+            last_seen_at = NOW(),
+            updated_at = NOW()
+        """,
+        (
+            user_id,
+            platform,
+            cid,
+            device_name,
+            sdk_version,
+            app_version_code,
+            app_version_name,
+            notifications_enabled,
+        ),
+    )
+    database.execute(
+        """
+        UPDATE push_devices
+        SET enabled = 0,
+            updated_at = NOW()
+        WHERE user_id = %s
+          AND cid <> %s
+          AND enabled = 1
+        """,
+        (user_id, cid),
+    )
+    row = database.fetch_one("SELECT * FROM push_devices WHERE cid = %s", (cid,))
+    return public_push_device(row)
+
+
+def disable_push_device(user_id: int, cid: str) -> int:
+    cid = str(cid or "").strip()
+    if not cid:
+        return 0
+    return database.execute(
+        """
+        UPDATE push_devices
+        SET enabled = 0,
+            updated_at = NOW()
+        WHERE user_id = %s
+          AND cid = %s
+          AND enabled = 1
+        """,
+        (user_id, cid),
+    )
+
+
+def fetch_push_cids(user_id: int) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT cid
+        FROM push_devices
+        WHERE user_id = %s
+          AND platform = 'android'
+          AND enabled = 1
+          AND notifications_enabled = 1
+        ORDER BY last_seen_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    return [row["cid"] for row in rows if row.get("cid")]
+
+
+def getui_base_url() -> str:
+    return config.GETUI_API_BASE.rstrip("/") + "/v2/" + config.GETUI_APP_ID
+
+
+def getui_sign(appkey: str, timestamp_ms: str, master_secret: str) -> str:
+    return hashlib.sha256(f"{appkey}{timestamp_ms}{master_secret}".encode("utf-8")).hexdigest()
+
+
+def getui_auth_token(force_refresh: bool = False) -> str:
+    global GETUI_TOKEN, GETUI_TOKEN_EXPIRE_MS
+    if not getui_configured():
+        return ""
+
+    now_ms = int(time.time() * 1000)
+    with GETUI_TOKEN_LOCK:
+        if not force_refresh and GETUI_TOKEN and GETUI_TOKEN_EXPIRE_MS - 60000 > now_ms:
+            return GETUI_TOKEN
+
+        timestamp = str(now_ms)
+        response = requests.post(
+            getui_base_url() + "/auth",
+            json={
+                "sign": getui_sign(config.GETUI_APP_KEY, timestamp, config.GETUI_MASTER_SECRET),
+                "timestamp": timestamp,
+                "appkey": config.GETUI_APP_KEY,
+            },
+            headers={"Content-Type": "application/json;charset=utf-8"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"个推鉴权失败：{body.get('code')} {body.get('msg')}")
+        data = body.get("data") or {}
+        GETUI_TOKEN = str(data.get("token") or "")
+        GETUI_TOKEN_EXPIRE_MS = int(data.get("expire_time") or 0)
+        if not GETUI_TOKEN:
+            raise RuntimeError("个推鉴权未返回 token")
+        return GETUI_TOKEN
+
+
+def getui_post(path: str, body: dict) -> dict:
+    token = getui_auth_token(False)
+    if not token:
+        return {"skipped": True, "reason": "getui_not_configured"}
+
+    def post_with_token(active_token: str):
+        response = requests.post(
+            getui_base_url() + path,
+            json=body,
+            headers={"Content-Type": "application/json;charset=utf-8", "token": active_token},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    result = post_with_token(token)
+    if result.get("code") == 10001:
+        result = post_with_token(getui_auth_token(True))
+    if result.get("code") != 0:
+        raise RuntimeError(f"个推推送失败：{result.get('code')} {result.get('msg')}")
+    return result
+
+
+def watch_alert_title(alert: dict) -> str:
+    return f"{alert.get('room_name') or alert.get('room_id') or '座位'} 有可预约座位"
+
+
+def watch_alert_body(alert: dict) -> str:
+    matched = [str(item) for item in (alert.get("matched_seats") or [])]
+    shown = matched[:8]
+    suffix = f" 等 {len(matched)} 个" if len(matched) > len(shown) else ""
+    seats = ", ".join(shown) + suffix if shown else "有空座"
+    return f"{alert.get('day')} {alert.get('start_time')}-{alert.get('end_time')} · {seats}"
+
+
+def getui_request_id(prefix: str, *parts) -> str:
+    raw = "|".join(str(part) for part in parts) + f"|{time.time_ns()}"
+    return (prefix + hashlib.sha256(raw.encode("utf-8")).hexdigest())[:32]
+
+
+def getui_watch_payload(alert: dict) -> str:
+    payload = {
+        "type": "search_seat_watch_alert",
+        "target_url": alert.get("reserve_url") or "/",
+        "alert": {
+            **alert,
+            "matched_seats": (alert.get("matched_seats") or [])[:30],
+        },
+    }
+    return dumps(payload, ensure_ascii=False, separators=(",", ":"))[:3000]
+
+
+def push_getui_watch_alert_to_cid(cid: str, alert: dict) -> dict:
+    title = watch_alert_title(alert)
+    body = watch_alert_body(alert)
+    request = {
+        "request_id": getui_request_id("ss", alert.get("id"), cid),
+        "settings": {
+            "ttl": max(0, int(config.GETUI_PUSH_TTL_MS or 7200000)),
+        },
+        "audience": {
+            "cid": [cid],
+        },
+        "push_message": {
+            "notification": {
+                "title": title[:50],
+                "body": body[:256],
+                "big_text": body[:512],
+                "channel_id": GETUI_WATCH_NOTIFICATION_CHANNEL_ID,
+                "channel_name": "座位命中提醒",
+                "channel_level": 4,
+                "click_type": "payload",
+                "payload": getui_watch_payload(alert),
+            },
+        },
+    }
+    return getui_post("/push/single/cid", request)
+
+
+def send_getui_watch_alert(user_id: int, alert: dict) -> list:
+    if not getui_configured():
+        return []
+    results = []
+    for cid in fetch_push_cids(user_id):
+        results.append(push_getui_watch_alert_to_cid(cid, alert))
+    return results
+
+
+def admin_push_payload(payload: dict) -> dict:
+    user_ids = []
+    seen = set()
+    for item in payload.get("user_ids") or []:
+        if not str(item).isdigit():
+            continue
+        user_id = int(item)
+        if user_id > 0 and user_id not in seen:
+            user_ids.append(user_id)
+            seen.add(user_id)
+    if not user_ids:
+        raise ValueError("请选择要推送的用户")
+    if len(user_ids) > 200:
+        raise ValueError("一次最多选择 200 个用户")
+
+    title = str(payload.get("title") or "").strip() or "座位雷达"
+    body = str(payload.get("body") or "").strip()
+    target_url = str(payload.get("target_url") or "").strip()
+    if not body:
+        raise ValueError("请填写推送内容")
+    if len(title) > 50:
+        raise ValueError("推送标题不能超过 50 字")
+    if len(body) > 256:
+        raise ValueError("推送内容不能超过 256 字")
+    if len(target_url) > 1024:
+        raise ValueError("打开链接不能超过 1024 字")
+    return {
+        "user_ids": user_ids,
+        "title": title,
+        "body": body,
+        "target_url": target_url,
+    }
+
+
+def fetch_push_devices_for_users(user_ids: list) -> list:
+    if not user_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(user_ids))
+    rows = database.fetch_all(
+        f"""
+        SELECT user_id, cid
+        FROM push_devices
+        WHERE user_id IN ({placeholders})
+          AND platform = 'android'
+          AND enabled = 1
+          AND notifications_enabled = 1
+        ORDER BY user_id ASC, last_seen_at DESC
+        """,
+        user_ids,
+    )
+    latest = []
+    seen = set()
+    for row in rows:
+        user_id = int(row.get("user_id") or 0)
+        if not user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        latest.append(row)
+    return latest
+
+
+def getui_admin_payload(target_url: str) -> str:
+    payload = {
+        "type": "admin_message",
+        "target_url": target_url or "/",
+    }
+    return dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def push_getui_admin_message_to_cid(cid: str, title: str, body: str, target_url: str) -> dict:
+    request = {
+        "request_id": getui_request_id("am", cid),
+        "settings": {
+            "ttl": max(0, int(config.GETUI_PUSH_TTL_MS or 7200000)),
+        },
+        "audience": {
+            "cid": [cid],
+        },
+        "push_message": {
+            "notification": {
+                "title": title,
+                "body": body,
+                "big_text": body,
+                "channel_id": GETUI_ADMIN_NOTIFICATION_CHANNEL_ID,
+                "channel_name": "后台消息提醒",
+                "channel_level": 4,
+                "click_type": "payload",
+                "payload": getui_admin_payload(target_url),
+            },
+        },
+    }
+    return getui_post("/push/single/cid", request)
+
+
+def send_admin_push_message(payload: dict) -> dict:
+    normalized = admin_push_payload(payload)
+    devices = fetch_push_devices_for_users(normalized["user_ids"])
+    reachable_user_ids = sorted({int(row["user_id"]) for row in devices})
+    result = {
+        "configured": getui_configured(),
+        "requested_users": len(normalized["user_ids"]),
+        "reachable_users": len(reachable_user_ids),
+        "target_cids": len(devices),
+        "sent": 0,
+        "failed": 0,
+        "failures": [],
+    }
+    if not getui_configured():
+        result["skipped"] = True
+        result["reason"] = "getui_not_configured"
+        return result
+
+    for row in devices:
+        try:
+            push_getui_admin_message_to_cid(
+                row["cid"],
+                normalized["title"],
+                normalized["body"],
+                normalized["target_url"],
+            )
+            result["sent"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            if len(result["failures"]) < 10:
+                result["failures"].append(
+                    {
+                        "user_id": row["user_id"],
+                        "cid": row["cid"],
+                        "error": str(exc)[:300],
+                    }
+                )
+    return result
+
+
+def parse_chat_datetime(value: str, field_name: str) -> str:
+    value = str(value or "").strip().replace("T", " ")
+    if len(value) == 16:
+        value = f"{value}:00"
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError as exc:
+        raise ValueError(f"{field_name} 必须是 YYYY-MM-DD HH:MM 格式") from exc
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def admin_chat_delete_scope(payload: dict) -> dict:
+    ids = []
+    seen = set()
+    for item in payload.get("ids") or []:
+        if not str(item).isdigit():
+            continue
+        message_id = int(item)
+        if message_id > 0 and message_id not in seen:
+            ids.append(message_id)
+            seen.add(message_id)
+    if ids:
+        return {"mode": "ids", "ids": ids}
+
+    start_at = str(payload.get("start_at") or "").strip()
+    end_at = str(payload.get("end_at") or "").strip()
+    if start_at and end_at:
+        start_at = parse_chat_datetime(start_at, "开始时间")
+        end_at = parse_chat_datetime(end_at, "结束时间")
+        if end_at < start_at:
+            raise ValueError("结束时间必须晚于开始时间")
+        return {"mode": "time", "start_at": start_at, "end_at": end_at}
+
+    raise ValueError("请选择要删除的消息或时间段")
+
+
+def fetch_chat_messages(limit: int = 100) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT m.id, m.user_id, m.content, m.created_at,
+               u.username, s.cx_user_name
+        FROM chat_messages m
+        JOIN users u ON u.id = m.user_id
+        LEFT JOIN chaoxing_sessions s ON s.user_id = m.user_id
+        ORDER BY m.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return [public_chat_message(row) for row in reversed(rows)]
+
+
+def fetch_chat_message(message_id: int):
+    row = database.fetch_one(
+        """
+        SELECT m.id, m.user_id, m.content, m.created_at,
+               u.username, s.cx_user_name
+        FROM chat_messages m
+        JOIN users u ON u.id = m.user_id
+        LEFT JOIN chaoxing_sessions s ON s.user_id = m.user_id
+        WHERE m.id = %s
+        """,
+        (message_id,),
+    )
+    return public_chat_message(row) if row else None
+
+
+def save_chat_message(user_id: int, content: str) -> dict:
+    message_id = database.execute(
+        "INSERT INTO chat_messages (user_id, content) VALUES (%s, %s)",
+        (user_id, content),
+    )
+    return fetch_chat_message(message_id)
+
+
+def delete_chat_messages(scope: dict) -> int:
+    if scope["mode"] == "ids":
+        placeholders = ",".join(["%s"] * len(scope["ids"]))
+        return database.execute(
+            f"DELETE FROM chat_messages WHERE id IN ({placeholders})",
+            scope["ids"],
+        )
+    return database.execute(
+        "DELETE FROM chat_messages WHERE created_at >= %s AND created_at <= %s",
+        (scope["start_at"], scope["end_at"]),
+    )
 
 
 def save_query_history(user_id: int, payload: dict) -> None:
@@ -975,7 +1558,15 @@ def process_watch_task(task: dict) -> None:
     matched = [item["seat"] for item in response["available"]]
     if matched:
         finish_watch_task(task["id"], "matched", matched)
-        publish_watch_alert(task["user_id"], build_watch_alert(task, matched))
+        alert = build_watch_alert(task, matched)
+        publish_watch_alert(task["user_id"], alert)
+        try:
+            send_getui_watch_alert(task["user_id"], alert)
+        except Exception as exc:
+            database.execute(
+                "UPDATE seat_watch_tasks SET last_error = %s, updated_at = NOW() WHERE id = %s",
+                (f"个推发送失败：{str(exc)[:1800]}", task["id"]),
+            )
         try:
             send_watch_webhook(task, matched)
         except Exception as exc:
@@ -1109,6 +1700,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/users":
                 self.handle_admin_users()
                 return
+            if path == "/api/admin/users/current-reserves":
+                self.handle_admin_users_current_reserves()
+                return
+            if path == "/api/admin/chat/messages":
+                self.handle_admin_chat_messages()
+                return
             if path.startswith("/api/admin/users/") and path.endswith("/cookie"):
                 self.handle_admin_user_cookie(path)
                 return
@@ -1123,6 +1720,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/me":
                 self.handle_me()
+                return
+            if path == "/api/chaoxing/cookies":
+                self.handle_chaoxing_cookies()
                 return
             if path == "/api/history":
                 self.handle_history()
@@ -1139,8 +1739,14 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/watch-alerts":
                 self.handle_watch_alerts()
                 return
+            if path == "/api/push/devices":
+                self.handle_push_devices()
+                return
             if path == "/api/watch-alerts/stream":
                 self.handle_watch_alert_stream()
+                return
+            if path == "/api/chat/messages":
+                self.handle_chat_messages()
                 return
             if path.startswith("/api/history/"):
                 self.handle_history_detail(path)
@@ -1166,7 +1772,10 @@ class AppHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == "/api/logout":
-                self.discard_request_body()
+                user = self.current_user()
+                payload = self.read_json()
+                if user:
+                    disable_push_device(user["id"], payload.get("cid"))
                 self.send_json(200, {"ok": True}, headers=[("Set-Cookie", auth.clear_session_cookie())])
                 return
             if path == "/api/admin/login":
@@ -1179,6 +1788,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/users/sync-missing-profiles":
                 self.discard_request_body()
                 self.handle_admin_sync_missing_profiles()
+                return
+            if path == "/api/admin/chat/messages/delete":
+                self.handle_admin_chat_messages_delete()
+                return
+            if path == "/api/admin/push/send":
+                self.handle_admin_push_send()
                 return
             if path.startswith("/api/admin/users/") and path.endswith("/disable"):
                 self.discard_request_body()
@@ -1221,6 +1836,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/watch-alerts/") and path.endswith("/ack"):
                 self.handle_watch_alert_ack(path)
                 return
+            if path == "/api/push/devices":
+                self.handle_push_device_register()
+                return
+            if path == "/api/chat/messages":
+                self.handle_chat_message_create()
+                return
             self.send_json(404, {"error": "not found"})
         except JSONDecodeError:
             self.send_json(400, {"error": "JSON 格式不正确"})
@@ -1258,6 +1879,13 @@ class AppHandler(BaseHTTPRequestHandler):
         database.init_db()
         users = fetch_admin_user_rows()
         self.send_json(200, {"users": users, "summary": admin_summary(users)})
+
+    def handle_admin_users_current_reserves(self):
+        if not self.require_admin():
+            return
+        database.init_db()
+        reserves = fetch_admin_current_reserve_rows()
+        self.send_json(200, {"reserves": reserves})
 
     def handle_admin_app_versions(self):
         if not self.require_admin():
@@ -1492,6 +2120,26 @@ class AppHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def handle_admin_chat_messages(self):
+        if not self.require_admin():
+            return
+        database.init_db()
+        self.send_json(200, {"messages": fetch_chat_messages(200)})
+
+    def handle_admin_chat_messages_delete(self):
+        if not self.require_admin():
+            return
+        payload = self.read_json()
+        scope = admin_chat_delete_scope(payload)
+        deleted = delete_chat_messages(scope)
+        self.send_json(200, {"ok": True, "deleted": deleted, "messages": fetch_chat_messages(200)})
+
+    def handle_admin_push_send(self):
+        if not self.require_admin():
+            return
+        result = send_admin_push_message(self.read_json())
+        self.send_json(200, {"ok": True, "result": result})
+
     def handle_me(self):
         user = self.current_user()
         if not user:
@@ -1519,6 +2167,20 @@ class AppHandler(BaseHTTPRequestHandler):
                     "default_webhook_url": settings.get("default_webhook_url") or config.NOTIFY_WEBHOOK_URL or "",
                 },
             },
+        )
+
+    def handle_chaoxing_cookies(self):
+        user = self.require_user()
+        if not user:
+            return
+        cx = get_chaoxing_session(user["id"])
+        if not cx:
+            self.send_json(409, {"error": "请先登录学习通"})
+            return
+        self.send_json(
+            200,
+            public_chaoxing_cookie_payload(cx["cookies_json"]),
+            headers=[("Cache-Control", "no-store")],
         )
 
     def handle_history(self):
@@ -1650,6 +2312,35 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         self.send_json(200, {"alerts": fetch_watch_alerts(user["id"])})
 
+    def handle_push_devices(self):
+        user = self.require_user()
+        if not user:
+            return
+        rows = database.fetch_all(
+            """
+            SELECT *
+            FROM push_devices
+            WHERE user_id = %s AND enabled = 1
+            ORDER BY last_seen_at DESC
+            LIMIT 10
+            """,
+            (user["id"],),
+        )
+        self.send_json(
+            200,
+            {
+                "configured": getui_configured(),
+                "devices": [public_push_device(row) for row in rows],
+            },
+        )
+
+    def handle_push_device_register(self):
+        user = self.require_user()
+        if not user:
+            return
+        device = save_push_device(user["id"], self.read_json())
+        self.send_json(200, {"ok": True, "configured": getui_configured(), "device": device})
+
     def handle_watch_alert_stream(self):
         user = self.require_user()
         if not user:
@@ -1755,6 +2446,23 @@ class AppHandler(BaseHTTPRequestHandler):
         action = str(payload.get("action") or "").strip()
         changed = acknowledge_watch_alert(user["id"], task_id, action)
         self.send_json(200, {"ok": True, "changed": changed, "alerts": fetch_watch_alerts(user["id"])})
+
+    def handle_chat_messages(self):
+        user = self.require_user()
+        if not user:
+            return
+        database.init_db()
+        self.send_json(200, {"messages": fetch_chat_messages(100)})
+
+    def handle_chat_message_create(self):
+        user = self.require_user()
+        if not user:
+            return
+        database.init_db()
+        payload = self.read_json()
+        content = chat_message_text_from_payload(payload)
+        message = save_chat_message(user["id"], content)
+        self.send_json(200, {"ok": True, "message": message, "messages": fetch_chat_messages(100)})
 
     def history_id_from_path(self, path: str) -> int:
         parts = [part for part in path.split("/") if part]
@@ -1960,7 +2668,7 @@ ADMIN_HTML = r"""
       color: var(--ink);
       outline: none;
     }
-    textarea { resize: vertical; font-family: var(--body); }
+    textarea { min-height: 84px; resize: vertical; line-height: 1.55; font-family: var(--body); }
     input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 91, 78, .14); }
     label { display: grid; gap: 7px; color: var(--muted); font-size: 13px; font-weight: 700; }
     button {
@@ -1992,9 +2700,24 @@ ADMIN_HTML = r"""
     }
     .auth form { display: grid; gap: 12px; }
     .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
-    .admin-menu { display: flex; gap: 8px; margin-bottom: 14px; }
-    .admin-menu-item { background: #fff; color: var(--green-dark); border: 1px solid var(--line); box-shadow: none; }
-    .admin-menu-item.active { background: var(--green); color: #fff; border-color: var(--green); }
+    .admin-menu {
+      display: inline-flex;
+      gap: 6px;
+      padding: 5px;
+      margin: 0 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .86);
+    }
+    .admin-menu-item {
+      min-height: 36px;
+      background: transparent;
+      color: var(--green-dark);
+      border: 0;
+      box-shadow: none;
+    }
+    .admin-menu-item:hover { background: #f1f6f2; color: var(--green-dark); }
+    .admin-menu-item.active { background: var(--green); color: #fff; }
     .admin-view.hidden { display: none !important; }
     .app-version-form { display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(120px, .7fr)) auto; gap: 12px; align-items: end; }
     .app-version-form .wide { grid-column: 1 / -1; }
@@ -2012,7 +2735,7 @@ ADMIN_HTML = r"""
     }
     .stat b { display: block; margin-top: 5px; color: var(--ink); font: 900 24px/1 var(--mono); }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-    table { width: 100%; border-collapse: collapse; min-width: 920px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1160px; }
     th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
     th { background: var(--soft); color: #4e6058; font-size: 12px; white-space: nowrap; }
     tr:hover td { background: #fbfdfb; }
@@ -2030,8 +2753,83 @@ ADMIN_HTML = r"""
     .pill.ok { background: #dff4ea; color: #0a5a3b; }
     .pill.warn { background: #fff3d6; color: #7b4d0a; }
     .pill.bad { background: #f8e3df; color: var(--red); }
+    .admin-reserves { display: grid; gap: 6px; min-width: 220px; max-width: 280px; }
+    .admin-reserve-card {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px;
+      border: 1px solid rgba(31, 91, 78, .18);
+      border-radius: 8px;
+      background: #fbfdfb;
+    }
+    .admin-reserve-seat {
+      display: grid;
+      place-items: center;
+      height: 34px;
+      border-radius: 7px;
+      background: #dff4ea;
+      color: #0a5a3b;
+      font: 900 14px/1 var(--mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-main { min-width: 0; }
+    .admin-reserve-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 850;
+    }
+    .admin-reserve-room {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-meta {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-badge {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: #e6f0ff;
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .admin-reserve-badge.using { background: #dff4ea; color: #0a5a3b; }
+    .admin-reserve-badge.pending { background: #fff3d6; color: #7b4d0a; }
+    .admin-reserve-badge.violation { background: #f8e3df; color: var(--red); }
+    .admin-reserve-empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      background: #fbfdfb;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .admin-reserve-more { color: var(--muted); font-size: 12px; font-weight: 800; }
     .actions { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
     .actions button { min-height: 32px; padding: 6px 9px; font-size: 12px; }
+    .check-cell { width: 38px; text-align: center; }
+    .chat-content { max-width: 460px; white-space: pre-wrap; word-break: break-word; }
+    .range-actions { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)) auto; gap: 8px; align-items: end; }
+    .push-form { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(220px, 1.2fr) minmax(180px, .9fr) auto; gap: 8px; align-items: end; margin-bottom: 12px; }
     .pager { display: flex; justify-content: flex-end; gap: 8px; align-items: center; margin-top: 10px; }
     .pager button { min-height: 32px; padding: 6px 10px; font-size: 12px; }
     .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
@@ -2045,6 +2843,9 @@ ADMIN_HTML = r"""
       section { padding: 14px; }
       .toolbar { align-items: stretch; flex-direction: column; }
       .toolbar .row { justify-content: flex-start; }
+      .admin-menu { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .admin-menu-item { width: 100%; }
+      .range-actions, .push-form { grid-template-columns: 1fr; }
       .stats, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .top-user { justify-content: flex-start; }
       .admin-menu, .app-version-form { display: grid; grid-template-columns: 1fr; }
@@ -2078,6 +2879,7 @@ ADMIN_HTML = r"""
     <div id="adminPanel" class="hidden">
       <nav class="admin-menu" aria-label="管理菜单">
         <button class="admin-menu-item active" type="button" data-admin-target="usersAdminView">用户管理</button>
+        <button class="admin-menu-item" type="button" data-admin-target="chatAdminView">消息聊天室</button>
         <button class="admin-menu-item" type="button" data-admin-target="appUpdateAdminView">App 更新</button>
       </nav>
 
@@ -2086,7 +2888,7 @@ ADMIN_HTML = r"""
         <div class="toolbar">
           <div>
             <h2>用户一览</h2>
-            <div class="muted">姓名从数据库读取，只有点击同步按钮才会请求学习通补全。</div>
+            <div class="muted">用户列表会优先展示；当前预约会随后实时读取学习通补充。</div>
           </div>
           <div class="row">
             <button class="ghost" id="refreshBtn" type="button">刷新</button>
@@ -2098,14 +2900,29 @@ ADMIN_HTML = r"""
           <div class="stat">查询记录 <b id="statQueries">0</b></div>
           <div class="stat">蹲座任务 <b id="statWatch">0</b></div>
         </div>
+        <form id="adminPushForm" class="push-form">
+          <label>推送标题
+            <input name="title" maxlength="50" value="座位雷达">
+          </label>
+          <label>推送内容
+            <input name="body" maxlength="256" placeholder="输入要发送给选中用户的消息" required>
+          </label>
+          <label>打开链接
+            <input name="target_url" maxlength="1024" placeholder="/ 或 /reserve?...">
+          </label>
+          <button type="submit">发送给选中用户</button>
+        </form>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th class="check-cell"><input id="userSelectAllAdmin" type="checkbox"></th>
                 <th>ID</th>
                 <th>姓名</th>
                 <th>用户（手机号、登录时间）</th>
                 <th>Cookie</th>
+                <th>推送</th>
+                <th>当前预约</th>
                 <th>查询</th>
                 <th>蹲座</th>
                 <th>操作</th>
@@ -2173,6 +2990,47 @@ ADMIN_HTML = r"""
       </section>
       </div>
 
+      <div id="chatAdminView" class="admin-view hidden" data-admin-view>
+        <section>
+          <div class="toolbar">
+            <div>
+              <h2>消息聊天室</h2>
+              <div class="muted">查看最近 200 条文字消息，可单条、批量或按时间段删除。</div>
+            </div>
+            <div class="row">
+              <button class="ghost" id="refreshChatAdminBtn" type="button">刷新消息</button>
+              <button class="danger" id="deleteSelectedChatBtn" type="button">删除选中</button>
+            </div>
+          </div>
+          <div class="range-actions">
+            <label>开始时间
+              <input id="chatDeleteStartAt" type="datetime-local">
+            </label>
+            <label>结束时间
+              <input id="chatDeleteEndAt" type="datetime-local">
+            </label>
+            <button class="danger" id="deleteChatRangeBtn" type="button">删除时间段</button>
+          </div>
+          <div class="table-wrap" style="margin-top: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th class="check-cell"><input id="chatSelectAllAdmin" type="checkbox"></th>
+                  <th>ID</th>
+                  <th>时间</th>
+                  <th>姓名</th>
+                  <th>用户</th>
+                  <th>内容</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="chatRowsAdmin"></tbody>
+            </table>
+          </div>
+          <div id="chatAdminMessage" class="message"></div>
+        </section>
+      </div>
+
       <div id="appUpdateAdminView" class="admin-view hidden" data-admin-view>
         <section>
           <div class="toolbar">
@@ -2233,6 +3091,8 @@ const loginForm = document.querySelector('#loginForm');
 const loginMessage = document.querySelector('#loginMessage');
 const usersMessage = document.querySelector('#usersMessage');
 const userRows = document.querySelector('#userRows');
+const userSelectAllAdmin = document.querySelector('#userSelectAllAdmin');
+const adminPushForm = document.querySelector('#adminPushForm');
 const detailPanel = document.querySelector('#detailPanel');
 const detailTitle = document.querySelector('#detailTitle');
 const detailSub = document.querySelector('#detailSub');
@@ -2245,11 +3105,18 @@ const detailSyncBtn = document.querySelector('#detailSyncBtn');
 const appVersionForm = document.querySelector('#appVersionForm');
 const appVersionRows = document.querySelector('#appVersionRows');
 const appUpdateMessage = document.querySelector('#appUpdateMessage');
+const chatRowsAdmin = document.querySelector('#chatRowsAdmin');
+const chatAdminMessage = document.querySelector('#chatAdminMessage');
+const chatSelectAllAdmin = document.querySelector('#chatSelectAllAdmin');
+const chatDeleteStartAt = document.querySelector('#chatDeleteStartAt');
+const chatDeleteEndAt = document.querySelector('#chatDeleteEndAt');
 let selectedUserId = null;
 let users = [];
 let appVersions = [];
+let adminChatMessages = [];
 let selectedQueryPage = 1;
 let selectedWatchPage = 1;
+let adminCurrentReservesRequest = 0;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -2315,6 +3182,9 @@ function switchAdminView(targetId) {
   if (targetId === 'appUpdateAdminView') {
     loadAppVersions().catch(error => setMessage(appUpdateMessage, error.message));
   }
+  if (targetId === 'chatAdminView') {
+    loadAdminChatMessages().catch(error => setMessage(chatAdminMessage, error.message));
+  }
 }
 
 function renderSummary(summary) {
@@ -2323,10 +3193,53 @@ function renderSummary(summary) {
   document.querySelector('#statWatch').textContent = summary.watch_tasks || 0;
 }
 
+function adminReserveStatusClass(status, label = '') {
+  if (label === '违约') return 'violation';
+  if (status === 1) return 'using';
+  if (status === 0) return 'pending';
+  return '';
+}
+
+function renderAdminCurrentReserves(user) {
+  if (user.current_reserves_loading) {
+    return '<div class="admin-reserve-empty">正在加载预约</div>';
+  }
+  const reserves = user.current_reserves || [];
+  if (!reserves.length) {
+    return `<div class="admin-reserve-empty ${user.current_reserves_error ? 'bad' : ''}">${escapeHtml(user.current_reserves_error || '当前没有预约')}</div>`;
+  }
+  const cards = reserves.slice(0, 2).map(item => {
+    const badgeClass = adminReserveStatusClass(item.status, item.status_label);
+    const detail = [
+      item.day,
+      item.time_range
+    ].filter(Boolean).join(' · ');
+    return `<div class="admin-reserve-card">
+      <span class="admin-reserve-seat">${escapeHtml(item.seat_num || '-')}</span>
+      <span class="admin-reserve-main">
+        <span class="admin-reserve-title">
+          <span class="admin-reserve-room">${escapeHtml(item.room_name || item.room_id || '预约座位')}</span>
+          <span class="admin-reserve-badge ${badgeClass}">${escapeHtml(item.status_label || '-')}</span>
+        </span>
+        <span class="admin-reserve-meta">${escapeHtml(detail || '-')}</span>
+      </span>
+    </div>`;
+  }).join('');
+  const more = reserves.length > 2 ? `<div class="admin-reserve-more">另有 ${reserves.length - 2} 个预约</div>` : '';
+  return `<div class="admin-reserves">${cards}${more}</div>`;
+}
+
 function renderUsers(data) {
-  users = data.users || [];
+  users = (data.users || []).map(user => ({
+    current_reserves: [],
+    current_reserves_error: '',
+    current_reserves_loading: true,
+    ...user
+  }));
+  userSelectAllAdmin.checked = false;
   renderSummary(data.summary || {});
   userRows.innerHTML = users.map(user => `<tr>
+    <td class="check-cell"><input class="user-check-admin" type="checkbox" value="${user.id}" ${Number(user.push_device_count || 0) > 0 ? '' : 'disabled'}></td>
     <td>${user.id}</td>
     <td>
       <b>${escapeHtml(user.cx_user_name || '-')}</b>
@@ -2340,6 +3253,8 @@ function renderUsers(data) {
       ${cookieStatus(user)}
       <div class="actions"><button class="ghost" type="button" ${user.cx_account ? '' : 'disabled'} onclick="copyUserCookie(${user.id})">复制</button></div>
     </td>
+    <td>${pushStatus(user)}</td>
+    <td data-current-reserves-user="${user.id}">${renderAdminCurrentReserves(user)}</td>
     <td>${user.query_count}<div class="muted">${escapeHtml(user.last_query_at || '-')}</div></td>
     <td>${watchStatus(user)}</td>
     <td><span class="actions">
@@ -2347,13 +3262,122 @@ function renderUsers(data) {
       <button type="button" onclick="syncUser(${user.id})">同步</button>
       <button id="toggleUser${user.id}" class="${user.disabled ? 'ghost' : 'danger'}" type="button" onclick="toggleUserDisabled(${user.id}, ${user.disabled ? 'false' : 'true'})">${user.disabled ? '启用' : '禁用'}</button>
     </span></td>
-  </tr>`).join('') || '<tr><td colspan="7">暂无用户</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="10">暂无用户</td></tr>';
+}
+
+function selectedAdminUserIds() {
+  return Array.from(new Set(
+    Array.from(document.querySelectorAll('.user-check-admin:checked')).map(item => Number(item.value))
+  ));
+}
+
+async function sendAdminPushMessage(event) {
+  event.preventDefault();
+  const userIds = selectedAdminUserIds();
+  if (!userIds.length) {
+    setMessage(usersMessage, '请选择至少一个已绑定推送设备的用户');
+    return;
+  }
+  const payload = Object.fromEntries(new FormData(adminPushForm).entries());
+  payload.user_ids = userIds;
+  const submit = adminPushForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  setMessage(usersMessage, `正在向 ${userIds.length} 个用户发送推送...`);
+  try {
+    const data = await api('/api/admin/push/send', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    const result = data.result || {};
+    if (result.skipped) {
+      setMessage(usersMessage, '个推服务端配置未启用，消息未发送');
+    } else if (Number(result.failed || 0) > 0) {
+      setMessage(usersMessage, `已发送 ${result.sent || 0} 个设备，失败 ${result.failed || 0} 个`);
+    } else {
+      setMessage(usersMessage, `已发送 ${result.sent || 0} 个设备，覆盖 ${result.reachable_users || 0} 个用户`, true);
+      adminPushForm.body.value = '';
+      adminPushForm.target_url.value = '';
+    }
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function renderAdminChatMessages() {
+  chatSelectAllAdmin.checked = false;
+  chatRowsAdmin.innerHTML = adminChatMessages.slice().reverse().map(message => `<tr>
+    <td class="check-cell"><input class="chat-check-admin" type="checkbox" value="${message.id}"></td>
+    <td>${message.id}</td>
+    <td>${escapeHtml(message.created_at)}</td>
+    <td><b>${escapeHtml(message.author_name)}</b></td>
+    <td>${escapeHtml(message.user_id)}</td>
+    <td class="chat-content">${escapeHtml(message.content)}</td>
+    <td><span class="actions">
+      <button class="danger" type="button" onclick="deleteAdminChatMessage(${message.id})">删除</button>
+    </span></td>
+  </tr>`).join('') || '<tr><td colspan="7">暂无聊天消息</td></tr>';
+}
+
+function selectedAdminChatIds() {
+  return Array.from(new Set(
+    Array.from(document.querySelectorAll('.chat-check-admin:checked')).map(item => Number(item.value))
+  ));
+}
+
+async function deleteAdminChatMessages(payload, confirmText) {
+  if (!window.confirm(confirmText)) return;
+  setMessage(chatAdminMessage, '正在删除...');
+  try {
+    const data = await api('/api/admin/chat/messages/delete', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    adminChatMessages = data.messages || [];
+    renderAdminChatMessages();
+    setMessage(chatAdminMessage, `已删除 ${data.deleted || 0} 条消息`, true);
+  } catch (error) {
+    setMessage(chatAdminMessage, error.message);
+  }
+}
+
+function deleteAdminChatMessage(id) {
+  deleteAdminChatMessages({ ids: [id] }, '确定删除这条聊天消息吗？');
+}
+
+function deleteSelectedAdminChatMessages() {
+  const ids = selectedAdminChatIds();
+  if (!ids.length) {
+    setMessage(chatAdminMessage, '请选择要删除的消息');
+    return;
+  }
+  deleteAdminChatMessages({ ids }, `确定删除选中的 ${ids.length} 条消息吗？`);
+}
+
+function deleteAdminChatRange() {
+  const startAt = chatDeleteStartAt.value;
+  const endAt = chatDeleteEndAt.value;
+  if (!startAt || !endAt) {
+    setMessage(chatAdminMessage, '请选择开始时间和结束时间');
+    return;
+  }
+  deleteAdminChatMessages(
+    { start_at: startAt, end_at: endAt },
+    `确定删除 ${startAt.replace('T', ' ')} 到 ${endAt.replace('T', ' ')} 的消息吗？`
+  );
 }
 
 function cookieStatus(user) {
   if (!user.cx_account) return '<span class="pill warn">未绑定</span>';
   if (user.session_valid) return '<span class="pill ok">正常</span>';
   return '<span class="pill bad">异常</span>';
+}
+
+function pushStatus(user) {
+  const count = Number(user.push_device_count || 0);
+  if (count > 0) return `<span class="pill ok">已绑定 ${count}</span>`;
+  return '<span class="pill warn">未绑定</span>';
 }
 
 function watchStatus(user) {
@@ -2397,11 +3421,66 @@ async function loadMe() {
   showAdmin(data.admin);
   await loadUsers();
   await loadAppVersions();
+  await loadAdminChatMessages();
 }
 
 async function loadUsers() {
   const data = await api('/api/admin/users', { method: 'GET', headers: {} });
   renderUsers(data);
+  loadAdminCurrentReserves();
+}
+
+function updateAdminCurrentReserveCells() {
+  users.forEach(user => {
+    const cell = document.querySelector(`[data-current-reserves-user="${user.id}"]`);
+    if (cell) {
+      cell.innerHTML = renderAdminCurrentReserves(user);
+    }
+  });
+}
+
+async function loadAdminCurrentReserves() {
+  const requestId = ++adminCurrentReservesRequest;
+  try {
+    const data = await api('/api/admin/users/current-reserves', { method: 'GET', headers: {} });
+    if (requestId !== adminCurrentReservesRequest) return;
+    const reservesByUser = new Map(
+      (data.reserves || []).map(item => [Number(item.user_id), item])
+    );
+    users = users.map(user => {
+      const current = reservesByUser.get(Number(user.id));
+      if (!current) {
+        return {
+          ...user,
+          current_reserves: [],
+          current_reserves_error: '未读取到预约',
+          current_reserves_loading: false
+        };
+      }
+      return {
+        ...user,
+        current_reserves: current.current_reserves || [],
+        current_reserves_error: current.current_reserves_error || '',
+        current_reserves_loading: false
+      };
+    });
+    updateAdminCurrentReserveCells();
+  } catch (error) {
+    if (requestId !== adminCurrentReservesRequest) return;
+    users = users.map(user => ({
+      ...user,
+      current_reserves: [],
+      current_reserves_error: error.message || '预约读取失败',
+      current_reserves_loading: false
+    }));
+    updateAdminCurrentReserveCells();
+  }
+}
+
+async function loadAdminChatMessages() {
+  const data = await api('/api/admin/chat/messages', { method: 'GET', headers: {} });
+  adminChatMessages = data.messages || [];
+  renderAdminChatMessages();
 }
 
 async function refreshAdminDataForUser(id) {
@@ -2418,6 +3497,7 @@ function renderDetailFields(user) {
     ['状态', user.disabled ? '已禁用' : '正常'],
     ['学习通账号', user.cx_account || '-'],
     ['学习通姓名', user.cx_user_name || '-'],
+    ['推送设备', user.push_device_count || 0],
     ['查询次数', user.query_count],
     ['蹲座次数', user.watch_count]
   ];
@@ -2559,6 +3639,7 @@ loginForm.addEventListener('submit', async event => {
     showAdmin(data.admin);
     await loadUsers();
     await loadAppVersions();
+    await loadAdminChatMessages();
   } catch (error) {
     setMessage(loginMessage, error.message);
   }
@@ -2610,6 +3691,48 @@ document.querySelector('#refreshBtn').addEventListener('click', async () => {
     setMessage(usersMessage, error.message);
   }
 });
+
+adminPushForm.addEventListener('submit', sendAdminPushMessage);
+
+userSelectAllAdmin.addEventListener('change', () => {
+  document.querySelectorAll('.user-check-admin:not(:disabled)').forEach(item => {
+    item.checked = userSelectAllAdmin.checked;
+  });
+});
+
+userRows.addEventListener('change', event => {
+  if (!event.target.classList.contains('user-check-admin')) return;
+  const checks = Array.from(document.querySelectorAll('.user-check-admin:not(:disabled)'));
+  userSelectAllAdmin.checked = checks.length > 0 && checks.every(item => item.checked);
+});
+
+adminMenuItems.forEach(item => {
+  item.addEventListener('click', () => switchAdminView(item.dataset.adminTarget));
+});
+
+document.querySelector('#refreshChatAdminBtn').addEventListener('click', async () => {
+  try {
+    await loadAdminChatMessages();
+    setMessage(chatAdminMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(chatAdminMessage, error.message);
+  }
+});
+
+chatSelectAllAdmin.addEventListener('change', () => {
+  document.querySelectorAll('.chat-check-admin').forEach(item => {
+    item.checked = chatSelectAllAdmin.checked;
+  });
+});
+
+chatRowsAdmin.addEventListener('change', event => {
+  if (!event.target.classList.contains('chat-check-admin')) return;
+  const checks = Array.from(document.querySelectorAll('.chat-check-admin'));
+  chatSelectAllAdmin.checked = checks.length > 0 && checks.every(item => item.checked);
+});
+
+document.querySelector('#deleteSelectedChatBtn').addEventListener('click', deleteSelectedAdminChatMessages);
+document.querySelector('#deleteChatRangeBtn').addEventListener('click', deleteAdminChatRange);
 
 document.querySelector('#syncMissingBtn').addEventListener('click', async () => {
   if (!window.confirm('本次最多补全 20 个缺失姓名的用户，继续吗？')) return;
@@ -2753,7 +3876,7 @@ INDEX_HTML = r"""
     }
     form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; align-items: end; }
     label { display: grid; gap: 7px; color: #526059; font-size: 13px; font-weight: 650; }
-    input, select {
+    input, select, textarea {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -2765,8 +3888,9 @@ INDEX_HTML = r"""
       outline: none;
       transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
     }
-    input:hover, select:hover { border-color: #96aa9d; }
-    input:focus, select:focus {
+    textarea { min-height: 86px; resize: vertical; line-height: 1.55; }
+    input:hover, select:hover, textarea:hover { border-color: #96aa9d; }
+    input:focus, select:focus, textarea:focus {
       border-color: var(--shelf);
       background: #fff;
       box-shadow: 0 0 0 3px rgba(31, 91, 78, .14);
@@ -2851,7 +3975,10 @@ INDEX_HTML = r"""
     #resultsPanel #resultsContent { margin-top: 16px; }
     .reserve-overview {
       margin-bottom: 14px;
-      padding: 12px;
+      width: calc(100% + 16px);
+      margin-left: -8px;
+      margin-right: -8px;
+      padding: 14px;
       border: 1px solid var(--soft-line);
       border-radius: 8px;
       background: linear-gradient(180deg, #fbfdf9 0%, #f5faf6 100%);
@@ -2871,8 +3998,8 @@ INDEX_HTML = r"""
     }
     .reserve-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 10px;
     }
     .reserve-card {
       display: grid;
@@ -3045,6 +4172,81 @@ INDEX_HTML = r"""
     .alert-seat-list { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: var(--available-soft); color: #0b4d35; line-height: 1.55; font-family: var(--mono-font); }
     .alert-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
     .alert-actions button { width: 100%; }
+    .chat-shell {
+      display: grid;
+      grid-template-rows: minmax(280px, 52vh) auto;
+      gap: 12px;
+    }
+    .chat-messages {
+      overflow: auto;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(248, 251, 246, .92)),
+        #fbfdf9;
+      padding: 14px;
+    }
+    .chat-message {
+      display: flex;
+      gap: 9px;
+      align-items: flex-start;
+      justify-content: flex-start;
+      width: 100%;
+      margin-bottom: 12px;
+    }
+    .chat-message.mine {
+      flex-direction: row-reverse;
+      justify-content: flex-start;
+    }
+    .chat-avatar {
+      flex: 0 0 auto;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: #dfe9e2;
+      color: var(--shelf-dark);
+      font: 850 13px/1 var(--display-font);
+      border: 1px solid #cbd8d0;
+    }
+    .chat-body { max-width: min(620px, 76%); min-width: 0; }
+    .chat-meta {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .chat-message.mine .chat-body { text-align: right; }
+    .chat-message.mine .chat-meta { justify-content: flex-end; }
+    .chat-name { color: var(--shelf-dark); font-weight: 850; }
+    .chat-bubble {
+      display: inline-block;
+      max-width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      line-height: 1.58;
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: 0 8px 18px rgba(22, 40, 34, .06);
+    }
+    .chat-message.mine .chat-bubble {
+      background: #e5f5eb;
+      border-color: rgba(18, 141, 97, .24);
+    }
+    .chat-form {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: stretch;
+    }
+    .chat-form textarea { min-height: 52px; max-height: 140px; }
+    .chat-form button { min-width: 92px; }
     .webhook-details { border: 1px solid var(--soft-line); border-radius: 8px; background: #f8fbf6; }
     .webhook-details summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 11px 12px; color: var(--shelf-dark); font-size: 13px; font-weight: 800; }
     .webhook-details summary::-webkit-details-marker { display: none; }
@@ -3200,6 +4402,7 @@ INDEX_HTML = r"""
       .stat b { font-size: 18px; }
       .wide { grid-column: span 1; }
       .statusbar { grid-template-columns: 1fr; }
+      .reserve-overview { width: auto; margin-left: 0; margin-right: 0; padding: 12px; }
       .reserve-overview-head { align-items: flex-start; }
       .reserve-grid { grid-template-columns: 1fr; }
       .button-link, form > button { width: 100%; }
@@ -3237,6 +4440,11 @@ INDEX_HTML = r"""
       .modal-panel { width: 100%; max-height: 100vh; border-radius: 0; border-left: 0; border-right: 0; padding: 14px; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
       .modal-head { flex-direction: column; }
       .alert-actions { grid-template-columns: 1fr; }
+      .chat-shell { grid-template-rows: minmax(320px, 58vh) auto; }
+      .chat-messages { padding: 10px; }
+      .chat-body { max-width: 78%; }
+      .chat-form { grid-template-columns: 1fr; }
+      .chat-form button { width: 100%; }
       .webhook-fields { grid-template-columns: 1fr; }
       .webhook-details summary { align-items: flex-start; }
       .webhook-summary { max-width: 48vw; }
@@ -3383,6 +4591,30 @@ INDEX_HTML = r"""
         </div>
       </section>
 
+      <section id="chatSection" class="app-view hidden" data-app-view>
+        <div class="section-head">
+          <h2>聊天室</h2>
+          <div class="section-actions">
+            <button class="text-button" id="refreshChatBtn" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="chat-shell">
+          <div id="chatMessages" class="chat-messages" aria-live="polite">
+            <div class="view-empty">
+              <div>
+                <b>正在读取消息</b>
+                <span>这里只显示文字消息。</span>
+              </div>
+            </div>
+          </div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="chatInput" name="content" maxlength="500" placeholder="输入文字消息" required></textarea>
+            <button type="submit">发送</button>
+          </form>
+        </div>
+        <div class="message" id="chatMessage"></div>
+      </section>
+
       <section id="watchSection" class="app-view hidden" data-app-view>
         <div class="section-head">
           <h2>蹲座提醒</h2>
@@ -3512,17 +4744,17 @@ INDEX_HTML = r"""
           </span>
           <span>结果</span>
         </button>
+        <button class="dock-item" type="button" data-dock-target="chatSection" aria-label="聊天室">
+          <span class="dock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path><path d="M8 9h8"></path><path d="M8 13h5"></path></svg>
+          </span>
+          <span>聊天</span>
+        </button>
         <button class="dock-item" type="button" data-dock-target="watchSection" aria-label="蹲座提醒">
           <span class="dock-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
           </span>
           <span>蹲座</span>
-        </button>
-        <button class="dock-item" type="button" data-dock-target="timetableSection" aria-label="课表 JSON">
-          <span class="dock-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M8 3v4"></path><path d="M16 3v4"></path><path d="M4 8h16"></path><rect x="4" y="5" width="16" height="16" rx="2"></rect><path d="M8 12h3"></path><path d="M8 16h5"></path></svg>
-          </span>
-          <span>课表</span>
         </button>
         <button class="dock-item" type="button" data-dock-target="historySection" aria-label="查询历史">
           <span class="dock-icon" aria-hidden="true">
@@ -3645,6 +4877,11 @@ const watchHistoryCards = document.querySelector('#watchHistoryCards');
 const reserveHistoryCards = document.querySelector('#reserveHistoryCards');
 const currentReservesStatus = document.querySelector('#currentReservesStatus');
 const currentReserveCards = document.querySelector('#currentReserveCards');
+const chatForm = document.querySelector('#chatForm');
+const chatInput = document.querySelector('#chatInput');
+const chatMessages = document.querySelector('#chatMessages');
+const chatMessage = document.querySelector('#chatMessage');
+const refreshChatBtn = document.querySelector('#refreshChatBtn');
 const queryHistoryPanel = document.querySelector('#queryHistoryPanel');
 const watchHistoryPanel = document.querySelector('#watchHistoryPanel');
 const reserveHistoryPanel = document.querySelector('#reserveHistoryPanel');
@@ -3694,12 +4931,15 @@ const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 
 const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
 const CURRENT_RESERVES_REFRESH_MS = 10000;
+const CHAT_REFRESH_MS = 3000;
 let latestResult = null;
 let latestTimetable = null;
 let officialIndexUrl = '';
+let currentUser = null;
 let historyItems = [];
 let watchItems = [];
 let reserveHistoryItems = [];
+let chatItems = [];
 let showAllHistory = false;
 let activeHistoryKind = 'query';
 let activeWatchAlert = null;
@@ -3710,6 +4950,7 @@ let disclaimerResolver = null;
 let watchAlertSource = null;
 let watchAlertReconnectTimer = null;
 let currentReservesTimer = null;
+let chatTimer = null;
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -3847,6 +5088,62 @@ function stopCurrentReservesRefresh() {
     clearInterval(currentReservesTimer);
     currentReservesTimer = null;
   }
+}
+
+function stopChatRefresh() {
+  if (chatTimer) {
+    clearInterval(chatTimer);
+    chatTimer = null;
+  }
+}
+
+function chatInitial(name) {
+  const trimmed = String(name || '').trim();
+  return trimmed ? trimmed.slice(0, 1).toUpperCase() : '人';
+}
+
+function renderChatMessages() {
+  if (!chatItems.length) {
+    chatMessages.innerHTML = `<div class="view-empty">
+      <div>
+        <b>还没有消息</b>
+        <span>发一条文字消息开始聊天。</span>
+      </div>
+    </div>`;
+    return;
+  }
+  chatMessages.innerHTML = chatItems.map(message => {
+    const mine = currentUser && Number(message.user_id) === Number(currentUser.id);
+    return `<div class="chat-message ${mine ? 'mine' : ''}">
+      <div class="chat-avatar" aria-hidden="true">${escapeHtml(chatInitial(message.author_name))}</div>
+      <div class="chat-body">
+        <div class="chat-meta">
+          <span class="chat-name">${escapeHtml(message.author_name)}</span>
+          <span>${escapeHtml(message.created_at || '')}</span>
+        </div>
+        <div class="chat-bubble">${escapeHtml(message.content)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+async function loadChatMessages({ silent = false } = {}) {
+  if (!silent) setMessage(chatMessage, '正在刷新消息...');
+  try {
+    const data = await api('/api/chat/messages', { method: 'GET', headers: {} });
+    chatItems = data.messages || [];
+    renderChatMessages();
+    if (!silent) setMessage(chatMessage, '消息已刷新', true);
+  } catch (error) {
+    if (!silent) setMessage(chatMessage, error.message);
+  }
+}
+
+function startChatRefresh() {
+  stopChatRefresh();
+  loadChatMessages({ silent: true });
+  chatTimer = setInterval(() => loadChatMessages({ silent: true }), CHAT_REFRESH_MS);
 }
 
 function currentReserveStatusClass(status, label = '') {
@@ -4039,13 +5336,16 @@ function fillDefaults(defaults) {
 
 function renderMe(data) {
   if (!data.user) {
+    currentUser = null;
     authPanel.classList.remove('hidden');
     appPanel.classList.add('hidden');
     topUser.classList.add('hidden');
     stopWatchAlertStream();
     stopCurrentReservesRefresh();
+    stopChatRefresh();
     return;
   }
+  currentUser = data.user;
   authPanel.classList.add('hidden');
   appPanel.classList.remove('hidden');
   topUser.classList.remove('hidden');
@@ -4059,6 +5359,7 @@ function renderMe(data) {
   }
   startWatchAlertStream();
   startCurrentReservesRefresh();
+  startChatRefresh();
   updateOfficialLink();
   switchAppView('querySection');
 }
@@ -4456,7 +5757,11 @@ authForm.addEventListener('submit', async event => {
 });
 
 document.querySelector('#logoutBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method: 'POST' });
+  const payload = {};
+  if (window.SearchSeatAndroid && typeof window.SearchSeatAndroid.getGetuiClientId === 'function') {
+    payload.cid = window.SearchSeatAndroid.getGetuiClientId();
+  }
+  await api('/api/logout', { method: 'POST', body: JSON.stringify(payload) });
   location.reload();
 });
 
@@ -4487,6 +5792,7 @@ toggleWatchBtn.addEventListener('click', () => {
   setHistoryKind('watch');
   switchAppView('historySection');
 });
+refreshChatBtn.addEventListener('click', () => loadChatMessages());
 dockItems.forEach(item => {
   item.addEventListener('click', () => switchAppView(item.dataset.dockTarget));
 });
@@ -4532,6 +5838,31 @@ queryForm.addEventListener('submit', async event => {
     await loadHistory();
   } catch (error) {
     setMessage(queryMessage, error.message);
+  }
+});
+
+chatForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const content = chatInput.value.trim();
+  if (!content) {
+    setMessage(chatMessage, '请输入聊天内容');
+    return;
+  }
+  setMessage(chatMessage, '正在发送...');
+  chatForm.querySelector('button').disabled = true;
+  try {
+    const data = await api('/api/chat/messages', {
+      method: 'POST',
+      body: JSON.stringify({ content })
+    });
+    chatInput.value = '';
+    chatItems = data.messages || [];
+    renderChatMessages();
+    setMessage(chatMessage, '已发送', true);
+  } catch (error) {
+    setMessage(chatMessage, error.message);
+  } finally {
+    chatForm.querySelector('button').disabled = false;
   }
 });
 

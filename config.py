@@ -86,6 +86,12 @@ ADMIN_SESSION_HOURS = get_int_env("ADMIN_SESSION_HOURS", 12)
 WATCH_INTERVAL_SECONDS = get_int_env("WATCH_INTERVAL_SECONDS", 60)
 NOTIFY_WEBHOOK_URL = get_env("NOTIFY_WEBHOOK_URL")
 
+GETUI_APP_ID = get_env("GETUI_APP_ID")
+GETUI_APP_KEY = get_env("GETUI_APP_KEY")
+GETUI_MASTER_SECRET = get_env("GETUI_MASTER_SECRET")
+GETUI_API_BASE = get_env("GETUI_API_BASE", "https://restapi.getui.com")
+GETUI_PUSH_TTL_MS = get_int_env("GETUI_PUSH_TTL_MS", 7200000)
+
 CHAOXING_SELECT_URL = "https://office.chaoxing.com/front/third/apps/seat/select"
 CHAOXING_USED_SEATS_URL = "https://office.chaoxing.com/data/apps/seat/getusedseatnums"
 CHAOXING_SEAT_INDEX_URL = "https://office.chaoxing.com/data/apps/seat/index"

@@ -5,6 +5,12 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$ROOT_DIR/app"
 BUILD_DIR="$ROOT_DIR/build"
 DIST_DIR="$ROOT_DIR/dist"
+DEPS_DIR="$ROOT_DIR/.deps"
+
+GETUI_APP_ID="${GETUI_APP_ID:-e03fqc6c5XAQYdkduOD0HA}"
+GETUI_GTSDK_VERSION="${GETUI_GTSDK_VERSION:-3.3.15.0}"
+GETUI_GTC_VERSION="${GETUI_GTC_VERSION:-3.3.3.0}"
+GETUI_MAVEN_BASE="${GETUI_MAVEN_BASE:-https://mvn.getui.com/nexus/content/repositories/releases}"
 
 ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 ANDROID_JAR="$ANDROID_HOME/platforms/android-36/android.jar"
@@ -31,13 +37,42 @@ for tool in "$AAPT2" "$D8" "$ZIPALIGN" "$APKSIGNER"; do
 done
 
 rm -rf "$BUILD_DIR" "$DIST_DIR"
-mkdir -p "$BUILD_DIR/gen" "$BUILD_DIR/classes" "$BUILD_DIR/dex" "$DIST_DIR"
+mkdir -p "$BUILD_DIR/gen" "$BUILD_DIR/classes" "$BUILD_DIR/dex" "$BUILD_DIR/deps" "$DIST_DIR" "$DEPS_DIR"
+
+download_aar() {
+  local group_path="$1"
+  local artifact="$2"
+  local version="$3"
+  local target="$DEPS_DIR/$artifact-$version.aar"
+  if [[ ! -f "$target" ]]; then
+    curl -fL "$GETUI_MAVEN_BASE/$group_path/$artifact/$version/$artifact-$version.aar" -o "$target"
+  fi
+  printf '%s\n' "$target"
+}
+
+extract_aar_classes() {
+  local aar="$1"
+  local name="$2"
+  local out_dir="$BUILD_DIR/deps/$name"
+  mkdir -p "$out_dir"
+  unzip -qo "$aar" classes.jar -d "$out_dir"
+  mv "$out_dir/classes.jar" "$BUILD_DIR/deps/$name.jar"
+}
+
+GTSDK_AAR="$(download_aar "com/getui" "gtsdk" "$GETUI_GTSDK_VERSION")"
+GTC_AAR="$(download_aar "com/getui" "gtc" "$GETUI_GTC_VERSION")"
+extract_aar_classes "$GTSDK_AAR" "gtsdk"
+extract_aar_classes "$GTC_AAR" "gtc"
+GETUI_CLASSPATH="$BUILD_DIR/deps/gtsdk.jar:$BUILD_DIR/deps/gtc.jar"
+
+sed "s/__GETUI_APPID__/$GETUI_APP_ID/g" \
+  "$APP_DIR/src/main/AndroidManifest.xml" > "$BUILD_DIR/AndroidManifest.xml"
 
 "$AAPT2" compile --dir "$APP_DIR/src/main/res" -o "$BUILD_DIR/res.zip"
 
 "$AAPT2" link \
   -I "$ANDROID_JAR" \
-  --manifest "$APP_DIR/src/main/AndroidManifest.xml" \
+  --manifest "$BUILD_DIR/AndroidManifest.xml" \
   --java "$BUILD_DIR/gen" \
   --min-sdk-version 23 \
   --target-sdk-version 36 \
@@ -51,7 +86,7 @@ javac \
   -source 8 \
   -target 8 \
   -encoding UTF-8 \
-  -classpath "$ANDROID_JAR" \
+  -classpath "$ANDROID_JAR:$GETUI_CLASSPATH" \
   -d "$BUILD_DIR/classes" \
   @"$BUILD_DIR/sources.txt"
 
@@ -59,7 +94,9 @@ javac \
   --min-api 23 \
   --lib "$ANDROID_JAR" \
   --output "$BUILD_DIR/dex" \
-  $(find "$BUILD_DIR/classes" -name '*.class' | sort)
+  $(find "$BUILD_DIR/classes" -name '*.class' | sort) \
+  "$BUILD_DIR/deps/gtsdk.jar" \
+  "$BUILD_DIR/deps/gtc.jar"
 
 cp "$BUILD_DIR/app-unsigned.apk" "$BUILD_DIR/app-unsigned-dex.apk"
 (cd "$BUILD_DIR/dex" && zip -q -r "$BUILD_DIR/app-unsigned-dex.apk" classes.dex)

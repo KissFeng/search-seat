@@ -5,7 +5,6 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
@@ -16,7 +15,6 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.media.AudioAttributes;
-import android.media.RingtoneManager;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
@@ -63,14 +61,16 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.security.MessageDigest;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     private static final String HOME_URL = "http://103.203.140.44:18000/";
     private static final String INTERNAL_HOST = "103.203.140.44";
     private static final String UPDATE_CHECK_URL = HOME_URL + "api/app-update/android";
     private static final String CHAOXING_PACKAGE = "com.chaoxing.mobile";
-    private static final String NOTIFICATION_CHANNEL_ID = "seat_match_alerts_v2";
+    private static final String NOTIFICATION_CHANNEL_ID = GetuiPushBridge.NOTIFICATION_CHANNEL_ID;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 42;
     private static final long ALERT_POLL_INTERVAL_MS = 5000L;
     private static final long[] NOTIFICATION_VIBRATION_PATTERN = new long[]{0, 260, 130, 260};
@@ -80,12 +80,15 @@ public class MainActivity extends Activity {
     private ProgressBar progressBar;
     private View errorView;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Object chaoxingCookieLock = new Object();
+    private final Set<String> preparedChaoxingCookieHosts = new HashSet<>();
     private boolean alertPollRunning = false;
     private volatile boolean alertPollInFlight = false;
     private volatile boolean updateCheckInFlight = false;
     private boolean optionalUpdateDismissed = false;
     private JSONObject pendingInstallUpdate = null;
     private File pendingInstallApk = null;
+    private boolean chaoxingCookieSyncInFlight = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -93,7 +96,8 @@ public class MainActivity extends Activity {
         configureWindow();
         setContentView(createContentView());
         configureWebView();
-        createNotificationChannel();
+        GetuiPushBridge.initialize(this);
+        GetuiPushBridge.ensureNotificationChannels(this);
         requestNotificationPermission();
         startNativeAlertPolling();
         checkForUpdatesInBackground(false);
@@ -128,6 +132,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        GetuiPushBridge.initialize(this);
+        GetuiPushBridge.syncClientIdInBackground(this);
         pollAlertsOnceInBackground();
         if (pendingInstallUpdate != null && pendingInstallApk != null) {
             installDownloadedApk(pendingInstallApk, pendingInstallUpdate);
@@ -289,30 +295,6 @@ public class MainActivity extends Activity {
         return HOME_URL + value;
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null || manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) != null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "座位命中提醒",
-                NotificationManager.IMPORTANCE_HIGH
-        );
-        channel.setDescription("蹲座位命中时发送提醒");
-        channel.enableVibration(true);
-        channel.setVibrationPattern(NOTIFICATION_VIBRATION_PATTERN);
-        AudioAttributes attributes = new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build();
-        channel.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), attributes);
-        manager.createNotificationChannel(channel);
-    }
-
     private void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -462,7 +444,8 @@ public class MainActivity extends Activity {
     private void downloadUpdateInBackground(JSONObject update) {
         Toast.makeText(this, "正在下载更新...", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
-            File apkFile = new File(getCacheDir(), "search-seat-update.apk");
+            File apkFile = updateApkFile(update);
+            deleteOldUpdateApks(apkFile);
             try {
                 HttpURLConnection connection = (HttpURLConnection) new URL(update.optString("apk_url")).openConnection();
                 connection.setConnectTimeout(10000);
@@ -496,6 +479,27 @@ public class MainActivity extends Activity {
                 });
             }
         }, "app-update-download").start();
+    }
+
+    private File updateApkFile(JSONObject update) {
+        int versionCode = Math.max(1, update.optInt("version_code", 1));
+        return new File(getCacheDir(), "search-seat-update-" + update.optInt("version_code", versionCode) + ".apk");
+    }
+
+    private void deleteOldUpdateApks(File keepFile) {
+        File[] files = getCacheDir().listFiles();
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            String name = file.getName();
+            if (file.equals(keepFile)) {
+                continue;
+            }
+            if ("search-seat-update.apk".equals(name) || (name.startsWith("search-seat-update-") && name.endsWith(".apk"))) {
+                file.delete();
+            }
+        }
     }
 
     private String sha256File(File file) throws Exception {
@@ -696,6 +700,9 @@ public class MainActivity extends Activity {
         }
 
         if ("http".equals(scheme) || "https".equals(scheme)) {
+            if (prepareChaoxingCookiesThenLoad(uri)) {
+                return true;
+            }
             if (isInternalWebHost(uri.getHost())) {
                 return false;
             }
@@ -724,6 +731,136 @@ public class MainActivity extends Activity {
             return !isInternalWebHost(uri.getHost());
         }
         return "intent".equals(scheme) || isChaoxingScheme(scheme);
+    }
+
+    private boolean prepareChaoxingCookiesThenLoad(Uri uri) {
+        if (!isChaoxingWebUrl(uri)) {
+            return false;
+        }
+
+        String host = lower(uri.getHost());
+        synchronized (chaoxingCookieLock) {
+            if (preparedChaoxingCookieHosts.contains(host)) {
+                return false;
+            }
+            if (chaoxingCookieSyncInFlight) {
+                return true;
+            }
+            chaoxingCookieSyncInFlight = true;
+        }
+
+        String targetUrl = uri.toString();
+        new Thread(() -> {
+            JSONArray cookies = null;
+            try {
+                cookies = fetchChaoxingCookies();
+            } catch (Exception ignored) {
+            }
+
+            JSONArray cookiesToInject = cookies;
+            mainHandler.post(() -> {
+                if (cookiesToInject != null) {
+                    injectChaoxingCookies(uri, cookiesToInject);
+                }
+                synchronized (chaoxingCookieLock) {
+                    preparedChaoxingCookieHosts.add(host);
+                    chaoxingCookieSyncInFlight = false;
+                }
+                webView.loadUrl(targetUrl);
+            });
+        }, "chaoxing-cookie-sync").start();
+        return true;
+    }
+
+    private boolean isChaoxingWebUrl(Uri uri) {
+        if (uri == null) {
+            return false;
+        }
+        String scheme = lower(uri.getScheme());
+        return ("http".equals(scheme) || "https".equals(scheme)) && isChaoxingHost(uri.getHost());
+    }
+
+    private JSONArray fetchChaoxingCookies() throws Exception {
+        String cookie = CookieManager.getInstance().getCookie(HOME_URL);
+        if (cookie == null || cookie.trim().isEmpty()) {
+            return null;
+        }
+
+        URL url = new URL(HOME_URL + "api/chaoxing/cookies");
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setRequestProperty("Cookie", cookie);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(8000);
+        int status = connection.getResponseCode();
+        if (status < 200 || status >= 300) {
+            return null;
+        }
+        return new JSONObject(readResponseBody(connection)).optJSONArray("cookies");
+    }
+
+    private void clearPreparedChaoxingCookieHosts() {
+        synchronized (chaoxingCookieLock) {
+            preparedChaoxingCookieHosts.clear();
+            chaoxingCookieSyncInFlight = false;
+        }
+    }
+
+    private void injectChaoxingCookies(Uri targetUri, JSONArray cookies) {
+        CookieManager cookieManager = CookieManager.getInstance();
+        for (int i = 0; i < cookies.length(); i++) {
+            JSONObject item = cookies.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            String name = item.optString("name", "").trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            String value = item.optString("value", "");
+            String domain = item.optString("domain", "").trim();
+            String path = item.optString("path", "/").trim();
+            if (path.isEmpty()) {
+                path = "/";
+            }
+            boolean secure = item.optBoolean("secure", false);
+            String cookieUrl = cookieUrlFor(targetUri, domain, secure);
+            StringBuilder cookie = new StringBuilder();
+            cookie.append(name).append("=").append(value);
+            cookie.append("; Path=").append(path);
+            if (!domain.isEmpty()) {
+                cookie.append("; Domain=").append(domain);
+            }
+            if (secure) {
+                cookie.append("; Secure");
+            }
+            cookieManager.setCookie(cookieUrl, cookie.toString());
+        }
+        flushCookies();
+    }
+
+    private String cookieUrlFor(Uri targetUri, String domain, boolean secure) {
+        String host = cookieHost(domain);
+        if (host.isEmpty()) {
+            host = targetUri.getHost();
+        }
+        String scheme = secure ? "https" : lower(targetUri.getScheme());
+        if (!"http".equals(scheme) && !"https".equals(scheme)) {
+            scheme = "https";
+        }
+        return scheme + "://" + host + "/";
+    }
+
+    private String cookieHost(String domain) {
+        if (domain == null) {
+            return "";
+        }
+        String host = domain.trim();
+        while (host.startsWith(".")) {
+            host = host.substring(1);
+        }
+        return host;
     }
 
     private boolean isInternalHost(String host) {
@@ -825,6 +962,16 @@ public class MainActivity extends Activity {
         public void notifySeatMatched(String alertId, String title, String body, String targetUrl) {
             mainHandler.post(() -> showSeatNotification(alertId, title, body, targetUrl));
         }
+
+        @JavascriptInterface
+        public String getGetuiClientId() {
+            return GetuiPushBridge.getClientId(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void syncGetuiClientId() {
+            GetuiPushBridge.syncClientIdInBackground(MainActivity.this);
+        }
     }
 
     private final class SearchSeatWebViewClient extends WebViewClient {
@@ -844,6 +991,10 @@ public class MainActivity extends Activity {
             progressBar.setVisibility(View.VISIBLE);
             progressBar.setProgress(8);
             Uri uri = Uri.parse(url);
+            if (prepareChaoxingCookiesThenLoad(uri)) {
+                view.stopLoading();
+                return;
+            }
             if (shouldOpenOutside(uri) && handleUri(uri)) {
                 view.stopLoading();
             }
@@ -852,6 +1003,7 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             flushCookies();
+            GetuiPushBridge.syncClientIdInBackground(MainActivity.this);
             progressBar.setVisibility(View.GONE);
         }
 
@@ -861,6 +1013,7 @@ public class MainActivity extends Activity {
             if (isInternalHost(uri.getHost())) {
                 String path = uri.getPath();
                 if ("/api/chaoxing/login".equals(path) || "/api/logout".equals(path)) {
+                    clearPreparedChaoxingCookieHosts();
                     flushCookiesSoon();
                 }
             }

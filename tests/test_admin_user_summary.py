@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import app
 
@@ -17,6 +18,87 @@ class AdminUserSummaryTests(unittest.TestCase):
 
         self.assertEqual(user["running_watch_count"], 2)
         self.assertEqual(user["watch_count"], 5)
+
+    def test_public_admin_users_with_current_reserves_fetches_and_hides_cookies(self):
+        rows = [
+            {
+                "id": 1,
+                "username": "13800138000",
+                "cookies_json": '{"SESSION":"secret"}',
+                "running_watch_count": 0,
+                "watch_count": 0,
+                "query_count": 0,
+            }
+        ]
+        reserves = [{"seat_num": "344", "status_label": "使用中"}]
+
+        with patch.object(
+            app,
+            "fetch_current_reserves_from_cookies",
+            return_value={"reserves": reserves, "error": ""},
+        ) as fetch_reserves:
+            users = app.public_admin_users_with_current_reserves(rows)
+
+        fetch_reserves.assert_called_once_with(1, '{"SESSION":"secret"}')
+        self.assertEqual(users[0]["current_reserves"], reserves)
+        self.assertEqual(users[0]["current_reserves_error"], "")
+        self.assertNotIn("cookies_json", users[0])
+
+    def test_public_admin_users_with_current_reserves_marks_missing_session(self):
+        rows = [
+            {
+                "id": 1,
+                "username": "13800138000",
+                "cookies_json": "",
+                "running_watch_count": 0,
+                "watch_count": 0,
+                "query_count": 0,
+            }
+        ]
+
+        with patch.object(app, "fetch_current_reserves_from_cookies") as fetch_reserves:
+            users = app.public_admin_users_with_current_reserves(rows)
+
+        fetch_reserves.assert_not_called()
+        self.assertEqual(users[0]["current_reserves"], [])
+        self.assertEqual(users[0]["current_reserves_error"], "未绑定学习通")
+
+    def test_fetch_admin_user_rows_does_not_fetch_current_reserves(self):
+        rows = [
+            {
+                "id": 1,
+                "username": "13800138000",
+                "cookies_json": '{"SESSION":"secret"}',
+                "running_watch_count": 0,
+                "watch_count": 0,
+                "query_count": 0,
+            }
+        ]
+
+        with patch.object(app.database, "fetch_all", return_value=rows), patch.object(
+            app, "fetch_current_reserves_from_cookies"
+        ) as fetch_reserves:
+            users = app.fetch_admin_user_rows()
+
+        fetch_reserves.assert_not_called()
+        self.assertEqual(users[0]["id"], 1)
+        self.assertNotIn("current_reserves", users[0])
+        self.assertNotIn("cookies_json", users[0])
+
+    def test_fetch_admin_current_reserve_rows_fetches_reserves(self):
+        rows = [{"id": 1, "cookies_json": '{"SESSION":"secret"}'}]
+        reserves = [{"seat_num": "344", "status_label": "使用中"}]
+
+        with patch.object(app.database, "fetch_all", return_value=rows), patch.object(
+            app,
+            "fetch_current_reserves_from_cookies",
+            return_value={"reserves": reserves, "error": ""},
+        ) as fetch_reserves:
+            result = app.fetch_admin_current_reserve_rows()
+
+        fetch_reserves.assert_called_once_with(1, '{"SESSION":"secret"}')
+        self.assertEqual(result[0]["user_id"], 1)
+        self.assertEqual(result[0]["current_reserves"], reserves)
 
     def test_timetable_week_defaults_to_empty(self):
         self.assertEqual(app.timetable_week_num_from_payload({}), "")

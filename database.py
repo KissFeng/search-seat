@@ -172,6 +172,47 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT UNSIGNED NOT NULL,
+                    content VARCHAR(500) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY idx_chat_messages_created (created_at),
+                    KEY idx_chat_messages_user_created (user_id, created_at),
+                    CONSTRAINT fk_chat_messages_user
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS push_devices (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT UNSIGNED NOT NULL,
+                    platform VARCHAR(20) NOT NULL DEFAULT 'android',
+                    cid VARCHAR(128) NOT NULL,
+                    device_name VARCHAR(255) NULL,
+                    sdk_version VARCHAR(64) NULL,
+                    app_version_code INT UNSIGNED NULL,
+                    app_version_name VARCHAR(64) NULL,
+                    notifications_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_push_devices_cid (cid),
+                    KEY idx_push_devices_user_enabled (user_id, enabled, last_seen_at),
+                    CONSTRAINT fk_push_devices_user
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:

@@ -12,6 +12,7 @@
 - 保存最近查询历史，可查看当次座位快照并删除记录
 - 开启蹲座位任务，筛选后出现任意可预约座位时发送 Webhook 通知并自动停止
 - Webhook 可保存为默认值，下次开启蹲座位时自动填入
+- Android WebView 客户端可绑定个推 CID，蹲座命中后通过个推自建通道推送提醒
 
 说明：后端保存的学习通 Cookie 可以用于本项目请求学习通接口，但浏览器从本地页面跳转到 `chaoxing.com` 时，后端不能给第三方域名写入 Cookie。如果浏览器没有登录学习通，官方预约页可能仍会要求登录。
 
@@ -31,6 +32,9 @@ DB_PASSWORD=123456
 DB_NAME=search_seat
 WATCH_INTERVAL_SECONDS=60
 NOTIFY_WEBHOOK_URL=
+GETUI_APP_ID=
+GETUI_APP_KEY=
+GETUI_MASTER_SECRET=
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=your-password
 ```
@@ -72,6 +76,7 @@ http://127.0.0.1:8000
 - `chaoxing_sessions`：每个学习通账号一条 Cookie
 - `seat_query_history`：查询历史和当次座位结果快照
 - `seat_watch_tasks`：蹲座位任务、筛选条件、状态和通知结果
+- `push_devices`：Android 客户端个推 CID 与内部用户的绑定关系
 
 ## 命令行查询
 

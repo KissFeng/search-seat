@@ -1,14 +1,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.searchseat.webview"
-    android:versionCode="6"
-    android:versionName="1.5">
+    android:versionCode="12"
+    android:versionName="2.1">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.GET_TASKS" />
+    <uses-permission android:name="com.vivo.notification.permission.BADGE_ICON" />
+    <uses-permission android:name="getui.permission.GetuiService.com.searchseat.webview" />
+
+    <permission
+        android:name="getui.permission.GetuiService.com.searchseat.webview"
+        android:protectionLevel="signature" />
 
     <queries>
         <package android:name="com.chaoxing.mobile" />
+        <intent>
+            <action android:name="com.getui.sdk.action" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="http" />
@@ -28,6 +40,7 @@
     </queries>
 
     <application
+        android:name=".SearchSeatApplication"
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
@@ -35,11 +48,66 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
+        <meta-data
+            android:name="GETUI_APPID"
+            android:value="__GETUI_APPID__" />
+        <meta-data
+            android:name="ZX_CHANNEL_ID"
+            android:value="C01-GEztJH0JLdBC" />
+        <meta-data
+            android:name="ZX_APPID_GETUI"
+            android:value="913e6a50-c3b6-4989-8ac6-1ecb53649be3" />
+        <meta-data
+            android:name="GTSDK_VERSION"
+            android:value="3.3.15.0" />
+
         <provider
             android:name=".ApkContentProvider"
             android:authorities="com.searchseat.webview.apkprovider"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <provider
+            android:name="com.getui.gtc.base.GtcProvider"
+            android:authorities="com.searchseat.webview.getui.gtc.provider"
+            android:exported="false" />
+        <service
+            android:name=".GetuiPushService"
+            android:exported="false"
+            android:label="PushService"
+            android:process=":pushservice" />
+        <service
+            android:name=".GetuiIntentService"
+            android:exported="false" />
+        <service
+            android:name="com.igexin.sdk.GService"
+            android:exported="true"
+            android:process=":pushservice">
+            <intent-filter>
+                <action android:name="com.getui.sdk.action" />
+            </intent-filter>
+        </service>
+        <service
+            android:name="com.getui.gtc.GtcService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.getui.gtc.sdk.service.action" />
+            </intent-filter>
+        </service>
+        <activity
+            android:name="com.igexin.sdk.GetuiActivity"
+            android:exported="true"
+            android:process=":pushservice"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="com.getui.sdk.action" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name="com.igexin.sdk.PopupActivity"
+            android:configChanges="screenSize|orientation"
+            android:exported="false"
+            android:process=":pushservice"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboardHidden|orientation|screenSize"
