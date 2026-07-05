@@ -118,3 +118,15 @@ ADMIN_PASSWORD=your-password
 ```
 
 后台可以查看所有用户、学习通账号、已持久化的学习通姓名、查询历史和蹲座历史，并支持禁用用户。用户首次登录学习通成功后，后端会尝试请求课程接口保存真实姓名；已有老用户如果缺少姓名，可以在后台点击“同步”或“补全缺失姓名”写入数据库。后台日常打开用户列表只读取数据库，不会每次访问都请求学习通。
+
+## Android App 更新
+
+管理后台的“App 更新”页可以上传 Android APK、填写 `versionCode` 和 `versionName`、更新说明，并选择是否强制更新。
+
+Android 客户端进入应用时会请求 `/api/app-update/android` 检查更新。发现新版本后会下载 APK、校验 SHA-256，然后打开 Android 系统安装器。普通 Android 应用不能静默安装 APK，用户仍需要在系统安装界面确认。
+
+APK 文件默认保存到 `uploads/apks/`，可通过环境变量覆盖：
+
+```env
+APK_UPLOAD_DIR=/absolute/path/to/apks
+```

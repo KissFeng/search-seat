@@ -22,6 +22,8 @@ class AppUpdateTests(unittest.TestCase):
     def test_safe_apk_filename_rejects_path_traversal_and_non_apk(self):
         with self.assertRaisesRegex(ValueError, "APK 文件名不正确"):
             app.safe_apk_filename("../bad.apk")
+        with self.assertRaisesRegex(ValueError, "APK 文件名不正确"):
+            app.safe_apk_filename("bad\r.apk")
         with self.assertRaisesRegex(ValueError, "只支持上传 APK 文件"):
             app.safe_apk_filename("bad.txt")
 
@@ -72,10 +74,33 @@ class AppUpdateTests(unittest.TestCase):
         self.assertTrue(payload["update"])
         self.assertEqual(payload["version_code"], 8)
 
-    def test_sha256_hex_reads_file(self):
+    def test_sha256_hex_hashes_bytes(self):
         digest = app.sha256_hex(b"abc")
 
         self.assertEqual(digest, hashlib.sha256(b"abc").hexdigest())
+
+    def test_apk_upload_metadata_builds_stable_filename(self):
+        metadata = app.apk_upload_metadata(
+            original_filename="Search Seat.apk",
+            version_code=9,
+            version_name="1.8",
+            release_notes="优化更新",
+            force_update=True,
+            data=b"apk bytes",
+        )
+
+        self.assertEqual(metadata["platform"], "android")
+        self.assertEqual(metadata["version_code"], 9)
+        self.assertEqual(metadata["version_name"], "1.8")
+        self.assertEqual(metadata["apk_filename"], "search-seat-9.apk")
+        self.assertEqual(metadata["apk_size"], 9)
+        self.assertEqual(metadata["apk_sha256"], hashlib.sha256(b"apk bytes").hexdigest())
+        self.assertEqual(metadata["release_notes"], "优化更新")
+        self.assertEqual(metadata["force_update"], 1)
+
+    def test_apk_upload_metadata_requires_apk_bytes(self):
+        with self.assertRaisesRegex(ValueError, "APK 文件不能为空"):
+            app.apk_upload_metadata("x.apk", 10, "1.9", "", False, b"")
 
 
 if __name__ == "__main__":

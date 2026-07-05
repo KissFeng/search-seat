@@ -3,6 +3,7 @@ package com.searchseat.webview;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -11,6 +12,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.media.AudioAttributes;
@@ -25,6 +27,7 @@ import android.os.Message;
 import android.os.VibrationEffect;
 import android.os.VibrationAttributes;
 import android.os.Vibrator;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -50,15 +53,22 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final String HOME_URL = "http://103.203.140.44:18000/";
     private static final String INTERNAL_HOST = "103.203.140.44";
+    private static final String UPDATE_CHECK_URL = HOME_URL + "api/app-update/android";
     private static final String CHAOXING_PACKAGE = "com.chaoxing.mobile";
     private static final String NOTIFICATION_CHANNEL_ID = "seat_match_alerts_v2";
     private static final int NOTIFICATION_PERMISSION_REQUEST = 42;
@@ -72,6 +82,10 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean alertPollRunning = false;
     private volatile boolean alertPollInFlight = false;
+    private volatile boolean updateCheckInFlight = false;
+    private boolean optionalUpdateDismissed = false;
+    private JSONObject pendingInstallUpdate = null;
+    private File pendingInstallApk = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -82,6 +96,7 @@ public class MainActivity extends Activity {
         createNotificationChannel();
         requestNotificationPermission();
         startNativeAlertPolling();
+        checkForUpdatesInBackground(false);
 
         if (savedInstanceState == null) {
             loadUrlFromIntent(getIntent());
@@ -114,6 +129,11 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         pollAlertsOnceInBackground();
+        if (pendingInstallUpdate != null && pendingInstallApk != null) {
+            installDownloadedApk(pendingInstallApk, pendingInstallUpdate);
+        } else {
+            checkForUpdatesInBackground(false);
+        }
     }
 
     @Override
@@ -343,14 +363,7 @@ public class MainActivity extends Activity {
                 if (status < 200 || status >= 300) {
                     return;
                 }
-                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
-                StringBuilder body = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    body.append(line);
-                }
-                reader.close();
-                JSONArray alerts = new JSONObject(body.toString()).optJSONArray("alerts");
+                JSONArray alerts = new JSONObject(readResponseBody(connection)).optJSONArray("alerts");
                 if (alerts == null) {
                     return;
                 }
@@ -373,6 +386,169 @@ public class MainActivity extends Activity {
                 }
             }
         }, "seat-alert-poll").start();
+    }
+
+    private int currentVersionCode() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                return (int) info.getLongVersionCode();
+            }
+            return info.versionCode;
+        } catch (Exception ignored) {
+            return 1;
+        }
+    }
+
+    private String currentVersionName() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "" : info.versionName;
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private void checkForUpdatesInBackground(boolean forcePrompt) {
+        if (updateCheckInFlight || (!forcePrompt && optionalUpdateDismissed)) {
+            return;
+        }
+        updateCheckInFlight = true;
+        new Thread(() -> {
+            try {
+                String urlText = UPDATE_CHECK_URL
+                        + "?version_code=" + currentVersionCode()
+                        + "&version_name=" + URLEncoder.encode(currentVersionName(), "UTF-8");
+                HttpURLConnection connection = (HttpURLConnection) new URL(urlText).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                int status = connection.getResponseCode();
+                if (status < 200 || status >= 300) {
+                    return;
+                }
+                JSONObject payload = new JSONObject(readResponseBody(connection));
+                if (payload.optBoolean("update", false)) {
+                    mainHandler.post(() -> showUpdateDialog(payload));
+                }
+            } catch (Exception ignored) {
+            } finally {
+                updateCheckInFlight = false;
+            }
+        }, "app-update-check").start();
+    }
+
+    private void showUpdateDialog(JSONObject update) {
+        boolean forceUpdate = update.optBoolean("force_update", false);
+        String versionName = update.optString("version_name", "");
+        String notes = update.optString("release_notes", "");
+        String message = notes == null || notes.trim().isEmpty()
+                ? "发现新版本 " + versionName
+                : "发现新版本 " + versionName + "\n\n" + notes;
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(forceUpdate ? "需要更新" : "发现新版本")
+                .setMessage(message)
+                .setPositiveButton("立即更新", (dialog, which) -> downloadUpdateInBackground(update));
+        if (forceUpdate) {
+            builder.setCancelable(false);
+            builder.setNegativeButton("退出", (dialog, which) -> finish());
+        } else {
+            builder.setNegativeButton("稍后", (dialog, which) -> optionalUpdateDismissed = true);
+        }
+        builder.show();
+    }
+
+    private void downloadUpdateInBackground(JSONObject update) {
+        Toast.makeText(this, "正在下载更新...", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            File apkFile = new File(getCacheDir(), "search-seat-update.apk");
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL(update.optString("apk_url")).openConnection();
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(30000);
+                int status = connection.getResponseCode();
+                if (status < 200 || status >= 300) {
+                    throw new RuntimeException("download failed");
+                }
+                InputStream input = connection.getInputStream();
+                FileOutputStream output = new FileOutputStream(apkFile);
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                output.close();
+                input.close();
+                String expectedHash = update.optString("apk_sha256", "");
+                String actualHash = sha256File(apkFile);
+                if (!expectedHash.equalsIgnoreCase(actualHash)) {
+                    apkFile.delete();
+                    throw new RuntimeException("hash mismatch");
+                }
+                mainHandler.post(() -> installDownloadedApk(apkFile, update));
+            } catch (Exception e) {
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "更新下载失败，请稍后重试", Toast.LENGTH_LONG).show();
+                    if (update.optBoolean("force_update", false)) {
+                        showUpdateDialog(update);
+                    }
+                });
+            }
+        }, "app-update-download").start();
+    }
+
+    private String sha256File(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        InputStream input = new FileInputStream(file);
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, read);
+        }
+        input.close();
+        byte[] bytes = digest.digest();
+        StringBuilder hex = new StringBuilder();
+        for (byte b : bytes) {
+            hex.append(String.format(Locale.ROOT, "%02x", b));
+        }
+        return hex.toString();
+    }
+
+    private void installDownloadedApk(File apkFile, JSONObject update) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+            pendingInstallApk = apkFile;
+            pendingInstallUpdate = update;
+            Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            tryStart(intent);
+            Toast.makeText(this, "请允许本应用安装未知来源应用", Toast.LENGTH_LONG).show();
+            return;
+        }
+        pendingInstallApk = null;
+        pendingInstallUpdate = null;
+        Uri apkUri = Uri.parse("content://" + ApkContentProvider.AUTHORITY + "/" + apkFile.getName());
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        if (!tryStart(intent)) {
+            Toast.makeText(this, "无法打开系统安装器", Toast.LENGTH_LONG).show();
+            if (update.optBoolean("force_update", false)) {
+                showUpdateDialog(update);
+            }
+        }
+    }
+
+    private String readResponseBody(HttpURLConnection connection) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+        StringBuilder body = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            body.append(line);
+        }
+        reader.close();
+        return body.toString();
     }
 
     private String buildAlertBody(JSONObject alert) {

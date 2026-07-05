@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from datetime import date, datetime, timedelta, timezone
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
 import hashlib
@@ -58,7 +60,13 @@ def android_version_code_from_params(params: dict) -> int:
 
 def safe_apk_filename(filename: str) -> str:
     name = os.path.basename(str(filename or "").strip())
-    if not name or name in {".", ".."} or name != str(filename or "").strip():
+    if (
+        not name
+        or name in {".", ".."}
+        or name != str(filename or "").strip()
+        or "\\" in name
+        or any(char in name for char in "\r\n\0")
+    ):
         raise ValueError("APK 文件名不正确")
     if not name.lower().endswith(".apk"):
         raise ValueError("只支持上传 APK 文件")
@@ -89,6 +97,124 @@ def app_update_payload(row: dict, current_version_code: int, base_url: str) -> d
     if not row or int(row["version_code"]) <= int(current_version_code):
         return {"update": False}
     return {"update": True, **public_app_version(row, base_url)}
+
+
+def apk_upload_metadata(
+    original_filename: str,
+    version_code: int,
+    version_name: str,
+    release_notes: str,
+    force_update: bool,
+    data: bytes,
+) -> dict:
+    safe_apk_filename(original_filename)
+    if version_code <= 0:
+        raise ValueError("版本号必须是正整数")
+    version_name = str(version_name or "").strip()
+    if not version_name:
+        raise ValueError("版本名称不能为空")
+    if not data:
+        raise ValueError("APK 文件不能为空")
+    return {
+        "platform": "android",
+        "version_code": int(version_code),
+        "version_name": version_name,
+        "apk_filename": f"search-seat-{int(version_code)}.apk",
+        "apk_size": len(data),
+        "apk_sha256": sha256_hex(data),
+        "release_notes": str(release_notes or "").strip(),
+        "force_update": 1 if force_update else 0,
+    }
+
+
+def request_base_url(handler) -> str:
+    proto = "https" if handler.headers.get("X-Forwarded-Proto") == "https" else "http"
+    host = handler.headers.get("Host") or f"127.0.0.1:{config.APP_PORT}"
+    return f"{proto}://{host}"
+
+
+def parse_multipart_form(handler) -> dict:
+    content_type = handler.headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type:
+        raise ValueError("请求必须使用 multipart/form-data")
+    length = int(handler.headers.get("Content-Length", "0"))
+    raw = handler.rfile.read(length)
+    header = (
+        f"Content-Type: {content_type}\r\n"
+        "MIME-Version: 1.0\r\n\r\n"
+    ).encode("utf-8")
+    message = BytesParser(policy=email_default_policy).parsebytes(header + raw)
+    form = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename() or ""
+        data = part.get_payload(decode=True) or b""
+        form[name] = {
+            "filename": filename,
+            "data": data,
+            "value": "" if filename else data.decode("utf-8", errors="replace"),
+        }
+    return form
+
+
+def form_value(form: dict, name: str, default: str = "") -> str:
+    item = form.get(name)
+    if item is None or item.get("filename"):
+        return default
+    return str(item.get("value") or "").strip()
+
+
+def fetch_app_versions(limit: int = 20) -> list:
+    return database.fetch_all(
+        """
+        SELECT id, platform, version_code, version_name, apk_filename, apk_size,
+               apk_sha256, release_notes, force_update, published, created_at
+        FROM app_versions
+        WHERE platform = 'android'
+        ORDER BY version_code DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+
+
+def fetch_latest_android_version_above(version_code: int):
+    return database.fetch_one(
+        """
+        SELECT id, platform, version_code, version_name, apk_filename, apk_size,
+               apk_sha256, release_notes, force_update, published, created_at
+        FROM app_versions
+        WHERE platform = 'android' AND published = 1 AND version_code > %s
+        ORDER BY version_code DESC
+        LIMIT 1
+        """,
+        (version_code,),
+    )
+
+
+def insert_app_version(metadata: dict) -> int:
+    return database.execute(
+        """
+        INSERT INTO app_versions (
+            platform, version_code, version_name, apk_filename, apk_size,
+            apk_sha256, release_notes, force_update, published
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            metadata["platform"],
+            metadata["version_code"],
+            metadata["version_name"],
+            metadata["apk_filename"],
+            metadata["apk_size"],
+            metadata["apk_sha256"],
+            metadata["release_notes"],
+            metadata["force_update"],
+        ),
+    )
 
 
 def validate_day(value: str) -> str:
@@ -977,6 +1103,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/me":
                 self.handle_admin_me()
                 return
+            if path == "/api/admin/app-versions":
+                self.handle_admin_app_versions()
+                return
             if path == "/api/admin/users":
                 self.handle_admin_users()
                 return
@@ -985,6 +1114,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/admin/users/"):
                 self.handle_admin_user_detail(parsed)
+                return
+            if path == "/api/app-update/android":
+                self.handle_android_app_update(parsed)
+                return
+            if path.startswith("/downloads/apks/"):
+                self.handle_apk_download(path)
                 return
             if path == "/api/me":
                 self.handle_me()
@@ -1057,6 +1192,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.discard_request_body()
                 self.handle_admin_user_sync(path)
                 return
+            if path == "/api/admin/app-versions":
+                self.handle_admin_app_version_upload()
+                return
             if path == "/api/chaoxing/login":
                 self.handle_chaoxing_login()
                 return
@@ -1120,6 +1258,70 @@ class AppHandler(BaseHTTPRequestHandler):
         database.init_db()
         users = fetch_admin_user_rows()
         self.send_json(200, {"users": users, "summary": admin_summary(users)})
+
+    def handle_admin_app_versions(self):
+        if not self.require_admin():
+            return
+        database.init_db()
+        base_url = request_base_url(self)
+        versions = [public_app_version(row, base_url) for row in fetch_app_versions()]
+        self.send_json(200, {"versions": versions})
+
+    def handle_android_app_update(self, parsed):
+        database.init_db()
+        current_version_code = android_version_code_from_params(parse_qs(parsed.query))
+        row = fetch_latest_android_version_above(current_version_code)
+        self.send_json(200, app_update_payload(row, current_version_code, request_base_url(self)))
+
+    def handle_admin_app_version_upload(self):
+        if not self.require_admin():
+            self.discard_request_body()
+            return
+        database.init_db()
+        form = parse_multipart_form(self)
+        apk_item = form.get("apk")
+        if apk_item is None or not apk_item.get("filename"):
+            raise ValueError("请选择 APK 文件")
+        data = apk_item.get("data") or b""
+        version_code = int(form_value(form, "version_code", "0") or "0")
+        if database.fetch_one(
+            "SELECT id FROM app_versions WHERE platform = 'android' AND version_code = %s",
+            (version_code,),
+        ):
+            raise ValueError("这个版本号已存在")
+        metadata = apk_upload_metadata(
+            apk_item["filename"],
+            version_code,
+            form_value(form, "version_name"),
+            form_value(form, "release_notes"),
+            form_value(form, "force_update") in {"1", "true", "on", "yes"},
+            data,
+        )
+        config.APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        target = config.APK_UPLOAD_DIR / metadata["apk_filename"]
+        if target.exists():
+            raise ValueError("这个版本的 APK 文件已存在")
+        target.write_bytes(data)
+        try:
+            insert_app_version(metadata)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        self.send_json(200, {"ok": True, "version": public_app_version(metadata, request_base_url(self))})
+
+    def handle_apk_download(self, path: str):
+        filename = safe_apk_filename(path.rsplit("/", 1)[-1])
+        target = config.APK_UPLOAD_DIR / filename
+        if not target.exists() or not target.is_file():
+            self.send_json(404, {"error": "APK 不存在"})
+            return
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.android.package-archive")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_admin_user_detail(self, parsed):
         if not self.require_admin():
@@ -1747,7 +1949,7 @@ ADMIN_HTML = r"""
       margin-bottom: 14px;
       box-shadow: 0 12px 28px rgba(21, 33, 28, .05);
     }
-    input {
+    input, textarea {
       width: 100%;
       min-height: 42px;
       padding: 10px 12px;
@@ -1758,7 +1960,8 @@ ADMIN_HTML = r"""
       color: var(--ink);
       outline: none;
     }
-    input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 91, 78, .14); }
+    textarea { resize: vertical; font-family: var(--body); }
+    input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 91, 78, .14); }
     label { display: grid; gap: 7px; color: var(--muted); font-size: 13px; font-weight: 700; }
     button {
       border: 0;
@@ -1789,6 +1992,14 @@ ADMIN_HTML = r"""
     }
     .auth form { display: grid; gap: 12px; }
     .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .admin-menu { display: flex; gap: 8px; margin-bottom: 14px; }
+    .admin-menu-item { background: #fff; color: var(--green-dark); border: 1px solid var(--line); box-shadow: none; }
+    .admin-menu-item.active { background: var(--green); color: #fff; border-color: var(--green); }
+    .admin-view.hidden { display: none !important; }
+    .app-version-form { display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(120px, .7fr)) auto; gap: 12px; align-items: end; }
+    .app-version-form .wide { grid-column: 1 / -1; }
+    .check-row { display: flex; align-items: center; gap: 8px; min-height: 42px; }
+    .check-row input { width: 16px; min-height: 0; height: 16px; padding: 0; }
     .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
     .stat {
       border: 1px solid var(--line);
@@ -1836,6 +2047,7 @@ ADMIN_HTML = r"""
       .toolbar .row { justify-content: flex-start; }
       .stats, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .top-user { justify-content: flex-start; }
+      .admin-menu, .app-version-form { display: grid; grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1864,6 +2076,12 @@ ADMIN_HTML = r"""
     </section>
 
     <div id="adminPanel" class="hidden">
+      <nav class="admin-menu" aria-label="管理菜单">
+        <button class="admin-menu-item active" type="button" data-admin-target="usersAdminView">用户管理</button>
+        <button class="admin-menu-item" type="button" data-admin-target="appUpdateAdminView">App 更新</button>
+      </nav>
+
+      <div id="usersAdminView" class="admin-view" data-admin-view>
       <section>
         <div class="toolbar">
           <div>
@@ -1953,6 +2171,54 @@ ADMIN_HTML = r"""
           </div>
         </div>
       </section>
+      </div>
+
+      <div id="appUpdateAdminView" class="admin-view hidden" data-admin-view>
+        <section>
+          <div class="toolbar">
+            <div>
+              <h2>Android App 更新</h2>
+              <div class="muted">上传 APK 后，Android 客户端进入应用时会检查版本并提示安装。</div>
+            </div>
+            <button class="ghost" id="refreshAppVersionsBtn" type="button">刷新版本</button>
+          </div>
+          <form id="appVersionForm" class="app-version-form" enctype="multipart/form-data">
+            <label>APK
+              <input name="apk" type="file" accept=".apk,application/vnd.android.package-archive" required>
+            </label>
+            <label>版本号
+              <input name="version_code" type="number" min="1" step="1" required>
+            </label>
+            <label>版本名
+              <input name="version_name" placeholder="1.6" required>
+            </label>
+            <label class="check-row">
+              <input name="force_update" type="checkbox" value="1">
+              强制更新
+            </label>
+            <label class="wide">更新说明
+              <textarea name="release_notes" rows="3" placeholder="本次更新内容"></textarea>
+            </label>
+            <button type="submit">上传发布</button>
+          </form>
+          <div class="table-wrap" style="margin-top: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>版本号</th>
+                  <th>版本名</th>
+                  <th>大小</th>
+                  <th>SHA-256</th>
+                  <th>强制</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody id="appVersionRows"></tbody>
+            </table>
+          </div>
+          <div id="appUpdateMessage" class="message"></div>
+        </section>
+      </div>
     </div>
   </main>
 
@@ -1961,6 +2227,8 @@ const loginPanel = document.querySelector('#loginPanel');
 const adminPanel = document.querySelector('#adminPanel');
 const topUser = document.querySelector('#topUser');
 const adminName = document.querySelector('#adminName');
+const adminMenuItems = Array.from(document.querySelectorAll('[data-admin-target]'));
+const adminViews = Array.from(document.querySelectorAll('[data-admin-view]'));
 const loginForm = document.querySelector('#loginForm');
 const loginMessage = document.querySelector('#loginMessage');
 const usersMessage = document.querySelector('#usersMessage');
@@ -1974,8 +2242,12 @@ const watchRowsAdmin = document.querySelector('#watchRowsAdmin');
 const queryPager = document.querySelector('#queryPager');
 const watchPager = document.querySelector('#watchPager');
 const detailSyncBtn = document.querySelector('#detailSyncBtn');
+const appVersionForm = document.querySelector('#appVersionForm');
+const appVersionRows = document.querySelector('#appVersionRows');
+const appUpdateMessage = document.querySelector('#appUpdateMessage');
 let selectedUserId = null;
 let users = [];
+let appVersions = [];
 let selectedQueryPage = 1;
 let selectedWatchPage = 1;
 
@@ -2030,6 +2302,19 @@ function showAdmin(admin) {
   adminPanel.classList.remove('hidden');
   topUser.classList.remove('hidden');
   adminName.textContent = admin.username;
+  switchAdminView('usersAdminView');
+}
+
+function switchAdminView(targetId) {
+  adminMenuItems.forEach(item => {
+    item.classList.toggle('active', item.dataset.adminTarget === targetId);
+  });
+  adminViews.forEach(view => {
+    view.classList.toggle('hidden', view.id !== targetId);
+  });
+  if (targetId === 'appUpdateAdminView') {
+    loadAppVersions().catch(error => setMessage(appUpdateMessage, error.message));
+  }
 }
 
 function renderSummary(summary) {
@@ -2079,6 +2364,30 @@ function watchStatus(user) {
   return `${user.watch_count}${status}<div class="muted">${escapeHtml(user.last_watch_at || '-')}</div>`;
 }
 
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+function renderAppVersions() {
+  appVersionRows.innerHTML = appVersions.map(version => `<tr>
+    <td>${escapeHtml(version.version_code)}</td>
+    <td><b>${escapeHtml(version.version_name)}</b></td>
+    <td>${escapeHtml(formatBytes(version.apk_size))}</td>
+    <td><code>${escapeHtml(String(version.apk_sha256 || '').slice(0, 12))}</code></td>
+    <td>${version.force_update ? '<span class="pill warn">强制</span>' : '<span class="pill">可选</span>'}</td>
+    <td>${escapeHtml(version.created_at || '-')}</td>
+  </tr>`).join('') || '<tr><td colspan="6">暂无版本</td></tr>';
+}
+
+async function loadAppVersions() {
+  const data = await api('/api/admin/app-versions', { method: 'GET', headers: {} });
+  appVersions = data.versions || [];
+  renderAppVersions();
+}
+
 async function loadMe() {
   const data = await api('/api/admin/me', { method: 'GET', headers: {} });
   if (!data.admin) {
@@ -2087,6 +2396,7 @@ async function loadMe() {
   }
   showAdmin(data.admin);
   await loadUsers();
+  await loadAppVersions();
 }
 
 async function loadUsers() {
@@ -2248,8 +2558,42 @@ loginForm.addEventListener('submit', async event => {
     setMessage(loginMessage, '', true);
     showAdmin(data.admin);
     await loadUsers();
+    await loadAppVersions();
   } catch (error) {
     setMessage(loginMessage, error.message);
+  }
+});
+
+adminMenuItems.forEach(item => {
+  item.addEventListener('click', () => switchAdminView(item.dataset.adminTarget));
+});
+
+document.querySelector('#refreshAppVersionsBtn').addEventListener('click', async () => {
+  try {
+    await loadAppVersions();
+    setMessage(appUpdateMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(appUpdateMessage, error.message);
+  }
+});
+
+appVersionForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  setMessage(appUpdateMessage, '正在上传 APK...');
+  const formData = new FormData(appVersionForm);
+  try {
+    const res = await fetch('/api/admin/app-versions', {
+      method: 'POST',
+      body: formData
+    });
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!res.ok) throw new Error(data.error || '上传失败');
+    appVersionForm.reset();
+    await loadAppVersions();
+    setMessage(appUpdateMessage, `已发布 ${data.version.version_name}`, true);
+  } catch (error) {
+    setMessage(appUpdateMessage, error.message);
   }
 });
 
