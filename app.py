@@ -4395,6 +4395,143 @@ INDEX_HTML = r"""
       padding: 24px;
     }
     .view-empty b { display: block; margin-bottom: 6px; color: var(--shelf-dark); font-size: 16px; }
+    .transcript-hero {
+      border: 1px solid var(--soft-line);
+      border-left: 4px solid var(--shelf);
+      border-radius: 8px;
+      padding: 18px 20px;
+      background: linear-gradient(135deg, #fbfdf9 0%, #f2f7f3 100%);
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .transcript-hero-info h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+      color: var(--shelf-dark);
+      font-weight: 850;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .transcript-hero-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--shelf);
+      background: #e5f5eb;
+      border: 1px solid rgba(18, 141, 97, .2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .transcript-hero-info p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .transcript-action-btn {
+      min-width: 170px;
+      font-size: 14px;
+      padding: 11px 22px;
+      box-shadow: 0 4px 14px rgba(18, 141, 97, .2);
+    }
+    .transcript-card {
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 18px;
+      margin-top: 14px;
+      box-shadow: 0 4px 18px rgba(22, 40, 34, .04);
+    }
+    .transcript-card-title {
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--shelf-dark);
+      margin: 0 0 12px;
+    }
+    .transcript-student-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .transcript-meta-cell {
+      background: #f8fbf6;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .transcript-meta-cell span {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .transcript-meta-cell b {
+      display: block;
+      font-size: 14px;
+      color: var(--ink);
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .transcript-pdf-box {
+      border: 1px solid #cce2d4;
+      background: #fbfdf9;
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .transcript-pdf-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .transcript-pdf-title {
+      font-weight: 750;
+      font-size: 13px;
+      color: var(--shelf-dark);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .transcript-pdf-url {
+      font-family: var(--mono);
+      font-size: 12px;
+      word-break: break-all;
+      color: var(--shelf);
+      font-weight: 600;
+      padding: 10px 12px;
+      background: #fff;
+      border-radius: 6px;
+      border: 1px solid var(--soft-line);
+      user-select: all;
+    }
+    .transcript-pdf-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .transcript-pdf-actions a, .transcript-pdf-actions button {
+      flex: 1;
+      min-width: 140px;
+      text-align: center;
+    }
+    .transcript-tip {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 4px;
+      line-height: 1.5;
+    }
     .app-dock {
       position: fixed;
       left: 50%;
@@ -4653,7 +4790,7 @@ INDEX_HTML = r"""
               <div id="cxStatus" class="muted"></div>
             </div>
             <div class="row" style="gap: 8px;">
-              <button class="text-button" id="transcriptModalOpenBtn" type="button">导出成绩单</button>
+              <button class="text-button" id="transcriptJumpBtn" type="button">成绩单</button>
               <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
             </div>
           </div>
@@ -4707,28 +4844,63 @@ INDEX_HTML = r"""
         </div>
       </section>
 
-      <section id="chatSection" class="app-view hidden" data-app-view>
+      <section id="transcriptSection" class="app-view hidden" data-app-view>
         <div class="section-head">
-          <h2>聊天室</h2>
+          <h2>学业成绩单</h2>
           <div class="section-actions">
-            <button class="text-button" id="refreshChatBtn" type="button">刷新</button>
+            <span class="muted" id="transcriptAccountBadge"></span>
           </div>
         </div>
-        <div class="chat-shell">
-          <div id="chatMessages" class="chat-messages" aria-live="polite">
-            <div class="view-empty">
-              <div>
-                <b>正在读取消息</b>
-                <span>这里只显示文字消息。</span>
+
+        <div class="transcript-hero">
+          <div class="transcript-hero-info">
+            <h3>
+              <span>学习通官方学业档案</span>
+              <span class="transcript-hero-badge">官方印章</span>
+            </h3>
+            <p>基于学习通官方学籍与成绩微应用，直接生成带官方防伪印章的学业成绩单 PDF 直链文件。</p>
+          </div>
+          <button id="transcriptFetchBtn" type="button" class="transcript-action-btn">一键生成成绩单 PDF</button>
+        </div>
+
+        <div class="message" id="transcriptMessage"></div>
+
+        <div id="transcriptEmpty" class="view-empty">
+          <div>
+            <b>还没有生成成绩单</b>
+            <span>点击上方“一键生成成绩单 PDF”，系统将自动从学习通官方获取您的学籍信息并生成最新 PDF 下载直链。</span>
+          </div>
+        </div>
+
+        <div id="transcriptContent" class="transcript-card hidden">
+          <div class="transcript-card-title">学籍档案信息</div>
+          <div class="transcript-student-meta">
+            <div class="transcript-meta-cell"><span>学生姓名</span><b id="transcriptStudentName">-</b></div>
+            <div class="transcript-meta-cell"><span>学号</span><b id="transcriptStudentNo">-</b></div>
+            <div class="transcript-meta-cell"><span>班级</span><b id="transcriptStudentClass">-</b></div>
+            <div class="transcript-meta-cell"><span>院系</span><b id="transcriptStudentCollege">-</b></div>
+            <div class="transcript-meta-cell"><span>专业</span><b id="transcriptStudentMajor">-</b></div>
+            <div class="transcript-meta-cell"><span>学籍状态</span><b id="transcriptStudentStatus">-</b></div>
+          </div>
+
+          <div class="transcript-pdf-box">
+            <div class="transcript-pdf-header">
+              <div class="transcript-pdf-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                <span>官方成绩单 PDF 直链</span>
               </div>
+              <span class="transcript-hero-badge">有效期内直链</span>
+            </div>
+            <div id="transcriptPdfUrlDisplay" class="transcript-pdf-url">-</div>
+            <div class="transcript-pdf-actions">
+              <a id="transcriptOpenBtn" class="button-link" href="#" target="_blank" rel="noreferrer">在新窗口打开 PDF</a>
+              <button id="transcriptCopyBtn" class="ghost" type="button">复制 PDF 直链</button>
+            </div>
+            <div class="transcript-tip">
+              * 注：该 PDF 成绩单由超星教学管理服务大厅动态编译生成，包含完整成绩、学分与绩点统计。
             </div>
           </div>
-          <form id="chatForm" class="chat-form">
-            <textarea id="chatInput" name="content" maxlength="500" placeholder="输入文字消息" required></textarea>
-            <button type="submit">发送</button>
-          </form>
         </div>
-        <div class="message" id="chatMessage"></div>
       </section>
 
       <section id="watchSection" class="app-view hidden" data-app-view>
@@ -4860,11 +5032,11 @@ INDEX_HTML = r"""
           </span>
           <span>结果</span>
         </button>
-        <button class="dock-item" type="button" data-dock-target="chatSection" aria-label="聊天室">
+        <button class="dock-item" type="button" data-dock-target="transcriptSection" aria-label="学业成绩单">
           <span class="dock-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path><path d="M8 9h8"></path><path d="M8 13h5"></path></svg>
+            <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
           </span>
-          <span>聊天</span>
+          <span>成绩单</span>
         </button>
         <button class="dock-item" type="button" data-dock-target="watchSection" aria-label="蹲座提醒">
           <span class="dock-icon" aria-hidden="true">
@@ -4881,42 +5053,6 @@ INDEX_HTML = r"""
       </nav>
     </div>
   </main>
-
-  <div id="transcriptModal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-panel">
-      <div class="modal-head">
-        <div>
-          <h2>学习通成绩单导出</h2>
-          <div class="muted">获取官方学业成绩单 PDF 直链</div>
-        </div>
-        <button class="ghost" id="transcriptModalClose" type="button">关闭</button>
-      </div>
-      <form id="transcriptModalForm">
-        <label>指定学号（可选，留空默认当前学生账号）
-          <input id="transcriptModalStudentNo" name="student_no" placeholder="如：202335810165">
-        </label>
-        <label>指定 Token / Cookie（可选，留空使用已绑定账号）
-          <input id="transcriptModalCustomAuth" name="custom_auth" placeholder="留空使用已登录学习通账号">
-        </label>
-        <button id="transcriptModalSubmitBtn" type="submit">立即获取成绩单 PDF</button>
-      </form>
-      <div class="message" id="transcriptModalMessage"></div>
-      <div id="transcriptModalResult" class="hidden" style="margin-top: 14px;">
-        <div class="stats">
-          <div class="stat">姓名 <b id="transcriptResultName">-</b></div>
-          <div class="stat">学号 <b id="transcriptResultNo">-</b></div>
-        </div>
-        <div class="card" style="margin-top: 12px; padding: 12px; background: #f8fbf6; border: 1px solid var(--soft-line); border-radius: 8px; word-break: break-all;">
-          <div style="font-size: 12px; color: var(--muted); margin-bottom: 6px;">成绩单 PDF 直链：</div>
-          <a id="transcriptResultPdfLink" href="#" target="_blank" rel="noreferrer" style="color: var(--shelf); font-weight: 700; text-decoration: underline; font-size: 13px;">-</a>
-        </div>
-        <div class="row" style="margin-top: 12px; gap: 8px;">
-          <a id="transcriptResultOpenBtn" class="button-link" href="#" target="_blank" rel="noreferrer" style="flex: 1; text-align: center;">在新窗口打开 PDF</a>
-          <button id="transcriptResultCopyBtn" class="ghost" type="button" style="flex: 1;">复制链接</button>
-        </div>
-      </div>
-    </div>
-  </div>
 
   <div id="historyModal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-panel">
@@ -5055,20 +5191,22 @@ const timetableTaskId = document.querySelector('#timetableTaskId');
 const timetableParameter = document.querySelector('#timetableParameter');
 const timetableTableType = document.querySelector('#timetableTableType');
 const timetableCourseCount = document.querySelector('#timetableCourseCount');
-const transcriptModal = document.querySelector('#transcriptModal');
-const transcriptModalOpenBtn = document.querySelector('#transcriptModalOpenBtn');
-const transcriptModalClose = document.querySelector('#transcriptModalClose');
-const transcriptModalForm = document.querySelector('#transcriptModalForm');
-const transcriptModalStudentNo = document.querySelector('#transcriptModalStudentNo');
-const transcriptModalCustomAuth = document.querySelector('#transcriptModalCustomAuth');
-const transcriptModalSubmitBtn = document.querySelector('#transcriptModalSubmitBtn');
-const transcriptModalMessage = document.querySelector('#transcriptModalMessage');
-const transcriptModalResult = document.querySelector('#transcriptModalResult');
-const transcriptResultName = document.querySelector('#transcriptResultName');
-const transcriptResultNo = document.querySelector('#transcriptResultNo');
-const transcriptResultPdfLink = document.querySelector('#transcriptResultPdfLink');
-const transcriptResultOpenBtn = document.querySelector('#transcriptResultOpenBtn');
-const transcriptResultCopyBtn = document.querySelector('#transcriptResultCopyBtn');
+const transcriptSection = document.querySelector('#transcriptSection');
+const transcriptAccountBadge = document.querySelector('#transcriptAccountBadge');
+const transcriptFetchBtn = document.querySelector('#transcriptFetchBtn');
+const transcriptMessage = document.querySelector('#transcriptMessage');
+const transcriptEmpty = document.querySelector('#transcriptEmpty');
+const transcriptContent = document.querySelector('#transcriptContent');
+const transcriptStudentName = document.querySelector('#transcriptStudentName');
+const transcriptStudentNo = document.querySelector('#transcriptStudentNo');
+const transcriptStudentClass = document.querySelector('#transcriptStudentClass');
+const transcriptStudentCollege = document.querySelector('#transcriptStudentCollege');
+const transcriptStudentMajor = document.querySelector('#transcriptStudentMajor');
+const transcriptStudentStatus = document.querySelector('#transcriptStudentStatus');
+const transcriptPdfUrlDisplay = document.querySelector('#transcriptPdfUrlDisplay');
+const transcriptOpenBtn = document.querySelector('#transcriptOpenBtn');
+const transcriptCopyBtn = document.querySelector('#transcriptCopyBtn');
+const transcriptJumpBtn = document.querySelector('#transcriptJumpBtn');
 const historyModal = document.querySelector('#historyModal');
 const historyModalClose = document.querySelector('#historyModalClose');
 const historyModalTitle = document.querySelector('#historyModalTitle');
@@ -5525,12 +5663,17 @@ function renderMe(data) {
   if (data.chaoxing.bound) {
     const validText = data.chaoxing.session_valid ? '已保存 Cookie' : 'Cookie 可能已失效';
     cxStatus.innerHTML = `${validText} · ${escapeHtml(data.chaoxing.cookies_updated_at || '')}`;
+    if (transcriptAccountBadge) {
+      transcriptAccountBadge.textContent = data.chaoxing.session_valid ? '已连接学习通' : '学习通会话可能已失效';
+    }
   } else {
     cxStatus.textContent = '未登录学习通';
+    if (transcriptAccountBadge) {
+      transcriptAccountBadge.textContent = '未登录学习通';
+    }
   }
   startWatchAlertStream();
   startCurrentReservesRefresh();
-  startChatRefresh();
   updateOfficialLink();
   switchAppView('querySection');
 }
@@ -5963,7 +6106,9 @@ toggleWatchBtn.addEventListener('click', () => {
   setHistoryKind('watch');
   switchAppView('historySection');
 });
-refreshChatBtn.addEventListener('click', () => loadChatMessages());
+if (refreshChatBtn) {
+  refreshChatBtn.addEventListener('click', () => loadChatMessages());
+}
 dockItems.forEach(item => {
   item.addEventListener('click', () => switchAppView(item.dataset.dockTarget));
 });
@@ -6012,30 +6157,33 @@ queryForm.addEventListener('submit', async event => {
   }
 });
 
-chatForm.addEventListener('submit', async event => {
-  event.preventDefault();
-  const content = chatInput.value.trim();
-  if (!content) {
-    setMessage(chatMessage, '请输入聊天内容');
-    return;
-  }
-  setMessage(chatMessage, '正在发送...');
-  chatForm.querySelector('button').disabled = true;
-  try {
-    const data = await api('/api/chat/messages', {
-      method: 'POST',
-      body: JSON.stringify({ content })
-    });
-    chatInput.value = '';
-    chatItems = data.messages || [];
-    renderChatMessages();
-    setMessage(chatMessage, '已发送', true);
-  } catch (error) {
-    setMessage(chatMessage, error.message);
-  } finally {
-    chatForm.querySelector('button').disabled = false;
-  }
-});
+if (chatForm) {
+  chatForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const content = chatInput ? chatInput.value.trim() : '';
+    if (!content) {
+      setMessage(chatMessage, '请输入聊天内容');
+      return;
+    }
+    setMessage(chatMessage, '正在发送...');
+    const btn = chatForm.querySelector('button');
+    if (btn) btn.disabled = true;
+    try {
+      const data = await api('/api/chat/messages', {
+        method: 'POST',
+        body: JSON.stringify({ content })
+      });
+      if (chatInput) chatInput.value = '';
+      chatItems = data.messages || [];
+      renderChatMessages();
+      setMessage(chatMessage, '已发送', true);
+    } catch (error) {
+      setMessage(chatMessage, error.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+}
 
 timetableFetchBtn.addEventListener('click', async () => {
   setMessage(timetableMessage, '正在获取课表...');
@@ -6058,62 +6206,51 @@ timetableFetchBtn.addEventListener('click', async () => {
 
 timetableDownloadBtn.addEventListener('click', downloadTimetableJson);
 
-if (transcriptModalOpenBtn) {
-  transcriptModalOpenBtn.addEventListener('click', () => {
-    transcriptModal.classList.remove('hidden');
-    setMessage(transcriptModalMessage, '');
+if (transcriptJumpBtn) {
+  transcriptJumpBtn.addEventListener('click', () => {
+    switchAppView('transcriptSection');
   });
 }
-if (transcriptModalClose) {
-  transcriptModalClose.addEventListener('click', () => {
-    transcriptModal.classList.add('hidden');
-  });
-}
-if (transcriptModalForm) {
-  transcriptModalForm.addEventListener('submit', async event => {
-    event.preventDefault();
-    setMessage(transcriptModalMessage, '正在请求学习通生成成绩单 PDF（生成通常耗时 5~15 秒），请耐心等待...');
-    transcriptModalSubmitBtn.disabled = true;
-    transcriptModalResult.classList.add('hidden');
+
+if (transcriptFetchBtn) {
+  transcriptFetchBtn.addEventListener('click', async () => {
+    setMessage(transcriptMessage, '正在从学习通官方获取学籍档案并生成成绩单 PDF（首次生成约需 5~15 秒），请耐心等待...');
+    transcriptFetchBtn.disabled = true;
     try {
-      const studentNo = transcriptModalStudentNo.value.trim();
-      const customAuth = transcriptModalCustomAuth.value.trim();
-      const payload = {};
-      if (studentNo) payload.student_no = studentNo;
-      if (customAuth) {
-        if (customAuth.includes('.') && !customAuth.includes('=')) {
-          payload.token = customAuth;
-        } else {
-          payload.cookie = customAuth;
-        }
-      }
       const data = await api('/api/chaoxing/transcript', {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({})
       });
-      transcriptResultName.textContent = data.student_name || '-';
-      transcriptResultNo.textContent = data.student_no || '-';
-      transcriptResultPdfLink.href = data.pdf_url;
-      transcriptResultPdfLink.textContent = data.pdf_url;
-      transcriptResultOpenBtn.href = data.pdf_url;
-      transcriptModalResult.classList.remove('hidden');
-      setMessage(transcriptModalMessage, '成绩单已生成！', true);
+      if (transcriptStudentName) transcriptStudentName.textContent = data.student_name || '-';
+      if (transcriptStudentNo) transcriptStudentNo.textContent = data.student_no || '-';
+      if (transcriptStudentClass) transcriptStudentClass.textContent = data.student_class || '-';
+      if (transcriptStudentCollege) transcriptStudentCollege.textContent = data.student_college || '-';
+      if (transcriptStudentMajor) transcriptStudentMajor.textContent = data.student_major || '-';
+      if (transcriptStudentStatus) transcriptStudentStatus.textContent = data.student_status || '-';
+
+      if (transcriptPdfUrlDisplay) transcriptPdfUrlDisplay.textContent = data.pdf_url;
+      if (transcriptOpenBtn) transcriptOpenBtn.href = data.pdf_url;
+
+      if (transcriptEmpty) transcriptEmpty.classList.add('hidden');
+      if (transcriptContent) transcriptContent.classList.remove('hidden');
+      setMessage(transcriptMessage, '学业成绩单 PDF 已生成成功！', true);
     } catch (error) {
-      setMessage(transcriptModalMessage, error.message);
+      setMessage(transcriptMessage, error.message);
     } finally {
-      transcriptModalSubmitBtn.disabled = false;
+      transcriptFetchBtn.disabled = false;
     }
   });
 }
-if (transcriptResultCopyBtn) {
-  transcriptResultCopyBtn.addEventListener('click', async () => {
-    const url = transcriptResultPdfLink.href;
-    if (!url || url === '#') return;
+
+if (transcriptCopyBtn) {
+  transcriptCopyBtn.addEventListener('click', async () => {
+    const url = transcriptPdfUrlDisplay ? transcriptPdfUrlDisplay.textContent.trim() : '';
+    if (!url || url === '-' || url === '#') return;
     try {
       await navigator.clipboard.writeText(url);
-      setMessage(transcriptModalMessage, 'PDF 直链已复制到剪贴板', true);
+      setMessage(transcriptMessage, 'PDF 直链已成功复制到剪贴板', true);
     } catch {
-      setMessage(transcriptModalMessage, '复制失败，请手动长按复制链接');
+      setMessage(transcriptMessage, '复制失败，请手动长按选择复制');
     }
   });
 }
