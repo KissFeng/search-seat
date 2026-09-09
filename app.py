@@ -4555,74 +4555,7 @@ INDEX_HTML = r"""
     .transcript-history-list {
       display: flex;
       flex-direction: column;
-      gap: 10px;
-    }
-    .transcript-history-item {
-      border: 1px solid var(--soft-line);
-      border-radius: 8px;
-      background: #fbfdf9;
-      padding: 12px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      transition: border-color .15s, background .15s;
-    }
-    .transcript-history-item:hover {
-      border-color: #c0d6c7;
-      background: #f6faf5;
-    }
-    .transcript-history-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .transcript-history-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-weight: 750;
-      color: var(--shelf-dark);
-      font-size: 13px;
-    }
-    .transcript-history-time {
-      font-size: 12px;
-      color: var(--muted);
-      font-family: var(--mono);
-    }
-    .transcript-history-link-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-      background: #fff;
-      border: 1px solid var(--soft-line);
-      border-radius: 6px;
-      padding: 8px 10px;
-    }
-    .transcript-history-url {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--shelf);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-      min-width: 140px;
-    }
-    .transcript-history-actions {
-      display: flex;
-      gap: 8px;
-      flex-shrink: 0;
-    }
-    .transcript-history-actions a,
-    .transcript-history-actions button {
-      min-height: 28px;
-      padding: 4px 10px;
-      font-size: 12px;
+      gap: 14px;
     }
     .transcript-pdf-box {
       border: 1px solid #cce2d4;
@@ -5022,7 +4955,7 @@ INDEX_HTML = r"""
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
                 <span>官方成绩单 PDF 直链</span>
               </div>
-              <span class="transcript-hero-badge">有效期内直链</span>
+              <span class="transcript-hero-badge" id="transcriptLatestBadge">最新生成</span>
             </div>
             <div id="transcriptPdfUrlDisplay" class="transcript-pdf-url">-</div>
             <div class="transcript-pdf-actions">
@@ -5338,6 +5271,7 @@ const transcriptFetchBtn = document.querySelector('#transcriptFetchBtn');
 const transcriptMessage = document.querySelector('#transcriptMessage');
 const transcriptEmpty = document.querySelector('#transcriptEmpty');
 const transcriptContent = document.querySelector('#transcriptContent');
+const transcriptLatestBadge = document.querySelector('#transcriptLatestBadge');
 const transcriptPdfUrlDisplay = document.querySelector('#transcriptPdfUrlDisplay');
 const transcriptOpenBtn = document.querySelector('#transcriptOpenBtn');
 const transcriptCopyBtn = document.querySelector('#transcriptCopyBtn');
@@ -6349,28 +6283,42 @@ timetableDownloadBtn.addEventListener('click', downloadTimetableJson);
 
 function renderTranscriptHistory(items) {
   if (!items || !items.length) {
+    if (transcriptEmpty) transcriptEmpty.classList.remove('hidden');
+    if (transcriptContent) transcriptContent.classList.add('hidden');
+    if (transcriptHistoryCard) transcriptHistoryCard.classList.add('hidden');
+    return;
+  }
+  const latest = items[0];
+  if (transcriptPdfUrlDisplay) transcriptPdfUrlDisplay.textContent = latest.pdf_url;
+  if (transcriptOpenBtn) transcriptOpenBtn.href = latest.pdf_url;
+  if (transcriptLatestBadge) {
+    transcriptLatestBadge.textContent = latest.created_at ? `最新生成 · ${latest.created_at}` : '最新生成';
+  }
+  if (transcriptEmpty) transcriptEmpty.classList.add('hidden');
+  if (transcriptContent) transcriptContent.classList.remove('hidden');
+
+  const previousItems = items.slice(1);
+  if (!previousItems.length) {
     if (transcriptHistoryCard) transcriptHistoryCard.classList.add('hidden');
     return;
   }
   if (transcriptHistoryCard) transcriptHistoryCard.classList.remove('hidden');
   if (transcriptHistoryList) {
-    transcriptHistoryList.innerHTML = items.map((item, index) => {
+    transcriptHistoryList.innerHTML = previousItems.map(item => {
       const time = escapeHtml(item.created_at || '');
       const url = escapeHtml(item.pdf_url || '');
-      return `<div class="transcript-history-item">
-        <div class="transcript-history-header">
-          <span class="transcript-history-tag">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-            <span>成绩单 #${index + 1}</span>
-          </span>
-          <span class="transcript-history-time">${time}</span>
-        </div>
-        <div class="transcript-history-link-row">
-          <span class="transcript-history-url" title="${url}">${url}</span>
-          <div class="transcript-history-actions">
-            <a class="button-link" href="${url}" target="_blank" rel="noreferrer">打开</a>
-            <button class="ghost" type="button" data-copy-url="${url}">复制直链</button>
+      return `<div class="transcript-pdf-box">
+        <div class="transcript-pdf-header">
+          <div class="transcript-pdf-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+            <span>官方成绩单 PDF 直链</span>
           </div>
+          <span class="transcript-hero-badge" style="background:#f4f6f4; color:var(--muted); border-color:var(--line);">${time}</span>
+        </div>
+        <div class="transcript-pdf-url">${url}</div>
+        <div class="transcript-pdf-actions">
+          <a class="button-link" href="${url}" target="_blank" rel="noreferrer">在新窗口打开 PDF</a>
+          <button class="ghost" type="button" data-copy-url="${url}">复制 PDF 直链</button>
         </div>
       </div>`;
     }).join('');
@@ -6380,15 +6328,7 @@ function renderTranscriptHistory(items) {
 async function loadTranscriptHistory() {
   try {
     const data = await api('/api/chaoxing/transcript', { method: 'GET', headers: {} });
-    const items = data.transcripts || [];
-    renderTranscriptHistory(items);
-    if (items.length > 0) {
-      const latest = items[0];
-      if (transcriptPdfUrlDisplay) transcriptPdfUrlDisplay.textContent = latest.pdf_url;
-      if (transcriptOpenBtn) transcriptOpenBtn.href = latest.pdf_url;
-      if (transcriptEmpty) transcriptEmpty.classList.add('hidden');
-      if (transcriptContent) transcriptContent.classList.remove('hidden');
-    }
+    renderTranscriptHistory(data.transcripts || []);
   } catch {
     // 忽略未登录或静默加载失败
   }
