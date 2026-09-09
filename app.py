@@ -42,6 +42,7 @@ GETUI_TOKEN = ""
 GETUI_TOKEN_EXPIRE_MS = 0
 GETUI_WATCH_NOTIFICATION_CHANNEL_ID = "seat_match_alerts_v3"
 GETUI_ADMIN_NOTIFICATION_CHANNEL_ID = "admin_messages_v1"
+CHECKIN_WINDOW_MINUTES = 15
 
 
 def json_default(value):
@@ -316,9 +317,48 @@ def room_label(room_id: str) -> str:
     return str(room_id)
 
 
+def room_seat_width(room_id: str) -> int:
+    for room in config.ROOMS:
+        if str(room.get("room_id")) == str(room_id):
+            return int(room.get("seat_width") or config.SEAT_WIDTH)
+    return int(config.SEAT_WIDTH)
+
+
+def public_seat_num(room_id: str, value) -> str:
+    seat_num = str(value or "").strip()
+    if not seat_num:
+        return ""
+    if seat_num.isdigit() and int(seat_num) > 0:
+        return seat_num.zfill(room_seat_width(room_id))
+    return seat_num
+
+
+def checkin_url(room_id: str, seat_num: str) -> str:
+    if not room_id or not seat_num:
+        return ""
+    return "https://office.chaoxing.com/front/apps/seat/code?" + urlencode(
+        {"id": room_id, "seatNum": seat_num}
+    )
+
+
+def reserve_checkin_window(item: dict, now_ms: int = None) -> dict:
+    start_ms = millisecond_value(item.get("startTime"))
+    if not start_ms:
+        return {"start_time": "", "end_time": "", "available": False}
+    window_ms = CHECKIN_WINDOW_MINUTES * 60 * 1000
+    start_window_ms = start_ms - window_ms
+    end_window_ms = start_ms + window_ms
+    current_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    return {
+        "start_time": millisecond_time(start_window_ms),
+        "end_time": millisecond_time(end_window_ms),
+        "available": item.get("status") == 0 and start_window_ms <= current_ms <= end_window_ms,
+    }
+
+
 def public_current_reserve(item: dict, now_ms: int = None) -> dict:
     room_id = str(item.get("roomId") or "")
-    seat_num = str(item.get("seatNum") or "").strip()
+    seat_num = public_seat_num(room_id, item.get("seatNum"))
     day = str(item.get("today") or "").strip()
     room_parts = [
         str(item.get("secondLevelName") or "").strip(),
@@ -329,6 +369,7 @@ def public_current_reserve(item: dict, now_ms: int = None) -> dict:
     start_time = millisecond_time(item.get("startTime"))
     end_time = millisecond_time(item.get("endTime"))
     time_range = f"{start_time}-{end_time}" if start_time and end_time else ""
+    checkin = reserve_checkin_window(item, now_ms)
     return {
         "id": item.get("id"),
         "room_id": room_id,
@@ -341,6 +382,13 @@ def public_current_reserve(item: dict, now_ms: int = None) -> dict:
         "status": status,
         "status_label": reserve_status_label(item, now_ms),
         "reserve_url": local_reserve_path(room_id, day, seat_num) if room_id and day else "",
+        "checkin_url": checkin_url(room_id, seat_num),
+        "checkin_available": checkin["available"],
+        "checkin_time_range": (
+            f"{checkin['start_time']}-{checkin['end_time']}"
+            if checkin["start_time"] and checkin["end_time"]
+            else ""
+        ),
     }
 
 
@@ -1816,6 +1864,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/chaoxing/timetable":
                 self.handle_chaoxing_timetable()
                 return
+            if path == "/api/chaoxing/transcript":
+                self.handle_chaoxing_transcript()
+                return
             if path == "/api/seats/query":
                 self.handle_seat_query()
                 return
@@ -2595,6 +2646,49 @@ class AppHandler(BaseHTTPRequestHandler):
 
         update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
         self.send_json(200, {"ok": True, "timetable": result})
+
+    def handle_chaoxing_transcript(self):
+        user = self.current_user()
+        payload = self.read_json()
+
+        cookie_raw = str(payload.get("cookie") or "").strip()
+        token = str(payload.get("token") or "").strip()
+        student_no = str(payload.get("student_no") or "").strip()
+        fid = str(payload.get("fid") or "").strip()
+        mapp_id = str(payload.get("mapp_id") or "").strip()
+
+        session = None
+        cookies_json = ""
+        user_id = user["id"] if user else None
+
+        if not token and not cookie_raw:
+            if not user:
+                self.send_json(401, {"error": "请先登录或提供学习通凭证"})
+                return
+            cx = get_chaoxing_session(user["id"])
+            if not cx or not cx.get("cookies_json"):
+                self.send_json(409, {"error": "请先登录学习通"})
+                return
+            session = chaoxing.session_from_cookie_json(cx["cookies_json"])
+            cookies_json = cx["cookies_json"]
+
+        try:
+            result = chaoxing.fetch_transcript_pdf_url(
+                session=session,
+                cookie_raw=cookie_raw,
+                cookies_json=cookies_json,
+                token=token,
+                student_no=student_no,
+                fid=fid,
+                mapp_id=mapp_id,
+            )
+            if user_id and session:
+                update_chaoxing_cookies(user_id, chaoxing.cookie_jar_to_json(session))
+            self.send_json(200, result)
+        except Exception as exc:
+            if user_id:
+                mark_chaoxing_error(user_id, str(exc))
+            self.send_json(500, {"error": f"导出成绩单失败：{str(exc)}"})
 
 
 ADMIN_HTML = r"""
@@ -4057,6 +4151,25 @@ INDEX_HTML = r"""
     .reserve-badge.using { background: var(--available-soft); color: #0a5a3b; }
     .reserve-badge.pending { background: #fff3d1; color: #7b4d0a; }
     .reserve-badge.violation { background: #ffe8e3; color: var(--danger); }
+    .reserve-checkin {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 26px;
+      padding: 4px 10px;
+      border-radius: 7px;
+      background: var(--shelf);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .reserve-checkin:hover {
+      background: var(--shelf-dark);
+      color: #fff;
+    }
     .reserve-empty {
       grid-column: 1 / -1;
       border: 1px dashed var(--line);
@@ -4539,7 +4652,10 @@ INDEX_HTML = r"""
               <h2>学习通账号</h2>
               <div id="cxStatus" class="muted"></div>
             </div>
-            <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
+            <div class="row" style="gap: 8px;">
+              <button class="text-button" id="transcriptModalOpenBtn" type="button">导出成绩单</button>
+              <a class="button-link" id="officialLink" href="#" target="_blank" rel="noreferrer">打开预约页</a>
+            </div>
           </div>
         </div>
         <div id="resultsEmpty" class="view-empty">
@@ -4766,6 +4882,42 @@ INDEX_HTML = r"""
     </div>
   </main>
 
+  <div id="transcriptModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-panel">
+      <div class="modal-head">
+        <div>
+          <h2>学习通成绩单导出</h2>
+          <div class="muted">获取官方学业成绩单 PDF 直链</div>
+        </div>
+        <button class="ghost" id="transcriptModalClose" type="button">关闭</button>
+      </div>
+      <form id="transcriptModalForm">
+        <label>指定学号（可选，留空默认当前学生账号）
+          <input id="transcriptModalStudentNo" name="student_no" placeholder="如：202335810165">
+        </label>
+        <label>指定 Token / Cookie（可选，留空使用已绑定账号）
+          <input id="transcriptModalCustomAuth" name="custom_auth" placeholder="留空使用已登录学习通账号">
+        </label>
+        <button id="transcriptModalSubmitBtn" type="submit">立即获取成绩单 PDF</button>
+      </form>
+      <div class="message" id="transcriptModalMessage"></div>
+      <div id="transcriptModalResult" class="hidden" style="margin-top: 14px;">
+        <div class="stats">
+          <div class="stat">姓名 <b id="transcriptResultName">-</b></div>
+          <div class="stat">学号 <b id="transcriptResultNo">-</b></div>
+        </div>
+        <div class="card" style="margin-top: 12px; padding: 12px; background: #f8fbf6; border: 1px solid var(--soft-line); border-radius: 8px; word-break: break-all;">
+          <div style="font-size: 12px; color: var(--muted); margin-bottom: 6px;">成绩单 PDF 直链：</div>
+          <a id="transcriptResultPdfLink" href="#" target="_blank" rel="noreferrer" style="color: var(--shelf); font-weight: 700; text-decoration: underline; font-size: 13px;">-</a>
+        </div>
+        <div class="row" style="margin-top: 12px; gap: 8px;">
+          <a id="transcriptResultOpenBtn" class="button-link" href="#" target="_blank" rel="noreferrer" style="flex: 1; text-align: center;">在新窗口打开 PDF</a>
+          <button id="transcriptResultCopyBtn" class="ghost" type="button" style="flex: 1;">复制链接</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="historyModal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-panel">
       <div class="modal-head">
@@ -4903,6 +5055,20 @@ const timetableTaskId = document.querySelector('#timetableTaskId');
 const timetableParameter = document.querySelector('#timetableParameter');
 const timetableTableType = document.querySelector('#timetableTableType');
 const timetableCourseCount = document.querySelector('#timetableCourseCount');
+const transcriptModal = document.querySelector('#transcriptModal');
+const transcriptModalOpenBtn = document.querySelector('#transcriptModalOpenBtn');
+const transcriptModalClose = document.querySelector('#transcriptModalClose');
+const transcriptModalForm = document.querySelector('#transcriptModalForm');
+const transcriptModalStudentNo = document.querySelector('#transcriptModalStudentNo');
+const transcriptModalCustomAuth = document.querySelector('#transcriptModalCustomAuth');
+const transcriptModalSubmitBtn = document.querySelector('#transcriptModalSubmitBtn');
+const transcriptModalMessage = document.querySelector('#transcriptModalMessage');
+const transcriptModalResult = document.querySelector('#transcriptModalResult');
+const transcriptResultName = document.querySelector('#transcriptResultName');
+const transcriptResultNo = document.querySelector('#transcriptResultNo');
+const transcriptResultPdfLink = document.querySelector('#transcriptResultPdfLink');
+const transcriptResultOpenBtn = document.querySelector('#transcriptResultOpenBtn');
+const transcriptResultCopyBtn = document.querySelector('#transcriptResultCopyBtn');
 const historyModal = document.querySelector('#historyModal');
 const historyModalClose = document.querySelector('#historyModalClose');
 const historyModalTitle = document.querySelector('#historyModalTitle');
@@ -5165,11 +5331,16 @@ function renderCurrentReserves(reserves) {
       item.day,
       item.time_range
     ].filter(Boolean).join(' · ');
+    const checkinTitle = item.checkin_time_range ? `签到时间 ${item.checkin_time_range}` : '签到';
+    const checkinLink = item.checkin_available && item.checkin_url
+      ? `<a class="reserve-checkin" href="${escapeHtml(item.checkin_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(checkinTitle)}">签到</a>`
+      : '';
     const body = `<span class="reserve-seat">${escapeHtml(item.seat_num || '-')}</span>
       <span class="reserve-main">
         <span class="reserve-title">
           <span>${escapeHtml(item.room_name || item.room_id || '预约座位')}</span>
           <span class="reserve-badge ${badgeClass}">${escapeHtml(item.status_label || '-')}</span>
+          ${checkinLink}
         </span>
         <span class="reserve-meta">${escapeHtml(detail || '-')}</span>
       </span>`;
@@ -5886,6 +6057,66 @@ timetableFetchBtn.addEventListener('click', async () => {
 });
 
 timetableDownloadBtn.addEventListener('click', downloadTimetableJson);
+
+if (transcriptModalOpenBtn) {
+  transcriptModalOpenBtn.addEventListener('click', () => {
+    transcriptModal.classList.remove('hidden');
+    setMessage(transcriptModalMessage, '');
+  });
+}
+if (transcriptModalClose) {
+  transcriptModalClose.addEventListener('click', () => {
+    transcriptModal.classList.add('hidden');
+  });
+}
+if (transcriptModalForm) {
+  transcriptModalForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    setMessage(transcriptModalMessage, '正在生成学业成绩单 PDF，请稍候...');
+    transcriptModalSubmitBtn.disabled = true;
+    transcriptModalResult.classList.add('hidden');
+    try {
+      const studentNo = transcriptModalStudentNo.value.trim();
+      const customAuth = transcriptModalCustomAuth.value.trim();
+      const payload = {};
+      if (studentNo) payload.student_no = studentNo;
+      if (customAuth) {
+        if (customAuth.includes('.') && !customAuth.includes('=')) {
+          payload.token = customAuth;
+        } else {
+          payload.cookie = customAuth;
+        }
+      }
+      const data = await api('/api/chaoxing/transcript', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      transcriptResultName.textContent = data.student_name || '-';
+      transcriptResultNo.textContent = data.student_no || '-';
+      transcriptResultPdfLink.href = data.pdf_url;
+      transcriptResultPdfLink.textContent = data.pdf_url;
+      transcriptResultOpenBtn.href = data.pdf_url;
+      transcriptModalResult.classList.remove('hidden');
+      setMessage(transcriptModalMessage, '成绩单已生成！', true);
+    } catch (error) {
+      setMessage(transcriptModalMessage, error.message);
+    } finally {
+      transcriptModalSubmitBtn.disabled = false;
+    }
+  });
+}
+if (transcriptResultCopyBtn) {
+  transcriptResultCopyBtn.addEventListener('click', async () => {
+    const url = transcriptResultPdfLink.href;
+    if (!url || url === '#') return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setMessage(transcriptModalMessage, 'PDF 直链已复制到剪贴板', true);
+    } catch {
+      setMessage(transcriptModalMessage, '复制失败，请手动长按复制链接');
+    }
+  });
+}
 
 watchForm.addEventListener('submit', async event => {
   event.preventDefault();

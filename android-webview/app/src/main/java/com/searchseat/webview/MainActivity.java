@@ -33,6 +33,7 @@ import android.view.Window;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
+import android.webkit.GeolocationPermissions;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -72,6 +73,7 @@ public class MainActivity extends Activity {
     private static final String CHAOXING_PACKAGE = "com.chaoxing.mobile";
     private static final String NOTIFICATION_CHANNEL_ID = GetuiPushBridge.NOTIFICATION_CHANNEL_ID;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 42;
+    private static final int LOCATION_PERMISSION_REQUEST = 43;
     private static final long ALERT_POLL_INTERVAL_MS = 5000L;
     private static final long[] NOTIFICATION_VIBRATION_PATTERN = new long[]{0, 260, 130, 260};
     private static final int[] NOTIFICATION_VIBRATION_AMPLITUDES = new int[]{0, 255, 0, 255};
@@ -87,6 +89,8 @@ public class MainActivity extends Activity {
     private volatile boolean updateCheckInFlight = false;
     private boolean optionalUpdateDismissed = false;
     private JSONObject pendingInstallUpdate = null;
+    private GeolocationPermissions.Callback pendingGeolocationCallback = null;
+    private String pendingGeolocationOrigin = null;
     private File pendingInstallApk = null;
     private boolean chaoxingCookieSyncInFlight = false;
 
@@ -260,6 +264,7 @@ public class MainActivity extends Activity {
         settings.setSupportMultipleWindows(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setGeolocationEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
 
@@ -299,6 +304,37 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST);
+        }
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestLocationPermission() {
+        if (!hasLocationPermission()) {
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+            }, LOCATION_PERMISSION_REQUEST);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == LOCATION_PERMISSION_REQUEST && pendingGeolocationCallback != null) {
+            boolean granted = false;
+            for (int result : grantResults) {
+                if (result == PackageManager.PERMISSION_GRANTED) {
+                    granted = true;
+                    break;
+                }
+            }
+            pendingGeolocationCallback.invoke(pendingGeolocationOrigin, granted, false);
+            pendingGeolocationCallback = null;
+            pendingGeolocationOrigin = null;
         }
     }
 
@@ -1057,6 +1093,17 @@ public class MainActivity extends Activity {
         public void onProgressChanged(WebView view, int newProgress) {
             progressBar.setProgress(newProgress);
             progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
+        }
+
+        @Override
+        public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+            if (hasLocationPermission()) {
+                callback.invoke(origin, true, false);
+            } else {
+                pendingGeolocationCallback = callback;
+                pendingGeolocationOrigin = origin;
+                requestLocationPermission();
+            }
         }
 
         @Override

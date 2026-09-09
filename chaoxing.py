@@ -3,6 +3,7 @@
 
 import base64
 import json
+import re
 import time
 from urllib.parse import parse_qs, urlencode, unquote, urlparse
 
@@ -16,6 +17,8 @@ import config
 CHAOXING_CURRICULUM_URL = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
 CHAOXING_TIMETABLE_REDIRECT_URL = "https://i.chaoxing.com/wfw/space/redirectUrl"
 CHAOXING_TIMETABLE_API_URL = "https://course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo"
+CHAOXING_SCORE_SEARCH_URL = "https://shelf.chaoxing.com/api/graduate/score/search"
+CHAOXING_SCORE_SINGLE_URL = "https://shelf.chaoxing.com/api/graduationStudentAudit/academicScore/v2/single"
 
 
 class ChaoxingAuthError(RuntimeError):
@@ -398,3 +401,113 @@ def find_adjacent_pairs(available_seats: list, width: int = config.SEAT_WIDTH) -
         if next_seat in available:
             pairs.append([seat, next_seat])
     return pairs
+
+
+def build_shelf_headers(token: str) -> dict:
+    return {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Origin": "https://shelf.chaoxing.com",
+        "Referer": "https://shelf.chaoxing.com/",
+        "token": token,
+    }
+
+
+def fetch_shelf_token(
+    session: requests.Session,
+    fid: str = "",
+    mapp_id: str = "",
+) -> str:
+    target_fid = str(fid or config.CHAOXING_SCORE_FID or "").strip()
+    target_mapp_id = str(mapp_id or config.CHAOXING_SCORE_MAPP_ID or "").strip()
+    entry_url = "https://i.chaoxing.com/wfw/space/redirectUrl?" + urlencode(
+        {
+            "fid": target_fid,
+            "type": config.CHAOXING_SCORE_REDIRECT_TYPE,
+            "mAppId": target_mapp_id,
+        }
+    )
+    resp = session.get(entry_url, headers=build_base_headers(), timeout=15, allow_redirects=True)
+    resp.raise_for_status()
+
+    match = re.search(r"[?&#]token=([^&#]+)", resp.url)
+    if not match:
+        if "403" in resp.url or "error" in resp.url.lower():
+            raise RuntimeError("学习通成绩应用访问被拒绝(403)，可能是该账号无成绩查询权限或需要重新登录")
+        raise RuntimeError(f"未能从成绩应用跳转链接获取凭证 token：{resp.url}")
+    return match.group(1)
+
+
+def search_academic_student(session: requests.Session, token: str, student_no: str = "") -> dict:
+    headers = build_shelf_headers(token)
+    payload = {"currentPage": 1, "pageSize": 10}
+    if student_no:
+        payload["studentNo"] = str(student_no).strip()
+    resp = session.post(CHAOXING_SCORE_SEARCH_URL, headers=headers, json=payload, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success", False) and data.get("code") != 200:
+        raise RuntimeError(data.get("msg") or "查询学籍学生信息失败")
+    return data
+
+
+def export_academic_score_pdf(session: requests.Session, token: str, student_no: str) -> str:
+    headers = build_shelf_headers(token)
+    payload = {"checkedStudentNo": str(student_no).strip()}
+    resp = session.post(CHAOXING_SCORE_SINGLE_URL, headers=headers, json=payload, timeout=40)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success", False) and data.get("code") != 200:
+        raise RuntimeError(data.get("msg") or "导出学业成绩单失败")
+    pdf_url = data.get("data")
+    if not pdf_url or not isinstance(pdf_url, str) or not pdf_url.startswith("http"):
+        raise RuntimeError(f"成绩单接口未返回有效的 PDF URL：{data}")
+    return pdf_url
+
+
+def fetch_transcript_pdf_url(
+    session: requests.Session = None,
+    cookie_raw: str = "",
+    cookies_json: str = "",
+    token: str = "",
+    student_no: str = "",
+    fid: str = "",
+    mapp_id: str = "",
+) -> dict:
+    if not session:
+        if cookies_json:
+            session = session_from_cookie_json(cookies_json)
+        elif cookie_raw:
+            session = session_from_cookie_header(cookie_raw)
+        else:
+            session = requests.Session()
+            session.headers.update(build_base_headers())
+
+    actual_token = str(token or "").strip()
+    if not actual_token:
+        actual_token = fetch_shelf_token(session, fid=fid, mapp_id=mapp_id)
+
+    target_student_no = str(student_no or "").strip()
+    student_info = None
+
+    search_result = search_academic_student(session, actual_token, student_no=target_student_no)
+    rows = (search_result.get("data") or {}).get("rows") or []
+    if rows:
+        student_info = rows[0]
+        if not target_student_no:
+            target_student_no = str(student_info.get("xsjbxx_xh") or "").strip()
+
+    if not target_student_no:
+        raise RuntimeError("未查询到学生学号，无法生成成绩单")
+
+    pdf_url = export_academic_score_pdf(session, actual_token, target_student_no)
+
+    return {
+        "ok": True,
+        "pdf_url": pdf_url,
+        "student_no": target_student_no,
+        "student_name": student_info.get("xsjbxx_xm", "") if student_info else "",
+        "student_info": student_info,
+        "token": actual_token,
+    }

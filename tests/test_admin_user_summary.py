@@ -116,7 +116,7 @@ class AdminUserSummaryTests(unittest.TestCase):
             "today": "2026-07-04",
         }
 
-        reserve = app.public_current_reserve(item)
+        reserve = app.public_current_reserve(item, now_ms=1783152000000)
 
         self.assertEqual(reserve["seat_num"], "344")
         self.assertEqual(reserve["room_name"], "2F-阅览区")
@@ -137,10 +137,70 @@ class AdminUserSummaryTests(unittest.TestCase):
             "today": "2026-07-05",
         }
 
-        reserve = app.public_current_reserve(item)
+        reserve = app.public_current_reserve(item, now_ms=1783238400000)
 
         self.assertEqual(reserve["status_label"], "待履约")
         self.assertEqual(reserve["time_range"], "16:00-20:00")
+
+    def test_public_current_reserve_includes_checkin_link_during_window(self):
+        item = {
+            "roomId": 12818,
+            "seatNum": "001",
+            "secondLevelName": "2F",
+            "thirdLevelName": "阅览区",
+            "startTime": 1783238400000,
+            "endTime": 1783252800000,
+            "status": 0,
+            "today": "2026-07-05",
+        }
+
+        reserve = app.public_current_reserve(item, now_ms=1783238400000)
+
+        self.assertEqual(reserve["seat_num"], "001")
+        self.assertTrue(reserve["checkin_available"])
+        self.assertEqual(reserve["checkin_time_range"], "15:45-16:15")
+        self.assertEqual(
+            reserve["checkin_url"],
+            "https://office.chaoxing.com/front/apps/seat/code?id=12818&seatNum=001",
+        )
+
+    def test_public_current_reserve_hides_checkin_link_outside_window(self):
+        item = {
+            "roomId": 12818,
+            "seatNum": 1,
+            "secondLevelName": "2F",
+            "thirdLevelName": "阅览区",
+            "startTime": 1783238400000,
+            "endTime": 1783252800000,
+            "status": 0,
+            "today": "2026-07-05",
+        }
+
+        reserve = app.public_current_reserve(item, now_ms=1783234800000)
+
+        self.assertEqual(reserve["seat_num"], "001")
+        self.assertFalse(reserve["checkin_available"])
+        self.assertEqual(
+            reserve["checkin_url"],
+            "https://office.chaoxing.com/front/apps/seat/code?id=12818&seatNum=001",
+        )
+
+    def test_public_current_reserve_hides_checkin_link_after_checkin(self):
+        item = {
+            "roomId": 12818,
+            "seatNum": "001",
+            "secondLevelName": "2F",
+            "thirdLevelName": "阅览区",
+            "startTime": 1783238400000,
+            "endTime": 1783252800000,
+            "status": 1,
+            "today": "2026-07-05",
+        }
+
+        reserve = app.public_current_reserve(item, now_ms=1783238400000)
+
+        self.assertFalse(reserve["checkin_available"])
+        self.assertEqual(reserve["status_label"], "使用中")
 
     def test_public_current_reserve_marks_expired_pending_as_violation(self):
         item = {
@@ -184,7 +244,7 @@ class AdminUserSummaryTests(unittest.TestCase):
 
         self.assertEqual(len(records), 10)
         self.assertEqual(records[0]["seat_num"], "0")
-        self.assertEqual(records[-1]["seat_num"], "9")
+        self.assertEqual(records[-1]["seat_num"], "009")
 
 
 if __name__ == "__main__":
