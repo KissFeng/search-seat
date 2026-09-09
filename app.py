@@ -1346,6 +1346,80 @@ def save_query_history(user_id: int, payload: dict) -> None:
     )
 
 
+def save_academic_transcript(user_id: int, pdf_url: str, student_info: dict = None, max_keep: int = 3) -> dict:
+    info = student_info or {}
+    row_id = database.execute(
+        """
+        INSERT INTO academic_transcripts
+            (user_id, student_name, student_no, student_class,
+             student_college, student_major, student_status, pdf_url)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            user_id,
+            str(info.get("student_name") or ""),
+            str(info.get("student_no") or ""),
+            str(info.get("student_class") or ""),
+            str(info.get("student_college") or ""),
+            str(info.get("student_major") or ""),
+            str(info.get("student_status") or ""),
+            str(pdf_url or ""),
+        ),
+    )
+    prune_academic_transcripts(user_id, max_keep=max_keep)
+    return fetch_academic_transcript_by_id(row_id)
+
+
+def prune_academic_transcripts(user_id: int, max_keep: int = 3) -> None:
+    excess_rows = database.fetch_all(
+        """
+        SELECT id FROM academic_transcripts
+        WHERE user_id = %s
+        ORDER BY id DESC
+        LIMIT 100 OFFSET %s
+        """,
+        (user_id, max_keep),
+    )
+    if excess_rows:
+        ids_to_del = [r["id"] for r in excess_rows]
+        placeholders = ",".join(["%s"] * len(ids_to_del))
+        database.execute(
+            f"DELETE FROM academic_transcripts WHERE id IN ({placeholders}) AND user_id = %s",
+            (*ids_to_del, user_id),
+        )
+
+
+def fetch_recent_academic_transcripts(user_id: int, limit: int = 3) -> list:
+    rows = database.fetch_all(
+        """
+        SELECT id, user_id, pdf_url, created_at
+        FROM academic_transcripts
+        WHERE user_id = %s
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (user_id, limit),
+    )
+    for r in rows:
+        if r.get("created_at"):
+            r["created_at"] = str(r["created_at"])
+    return rows
+
+
+def fetch_academic_transcript_by_id(record_id: int):
+    row = database.fetch_one(
+        """
+        SELECT id, user_id, pdf_url, created_at
+        FROM academic_transcripts
+        WHERE id = %s
+        """,
+        (record_id,),
+    )
+    if row and row.get("created_at"):
+        row["created_at"] = str(row["created_at"])
+    return row
+
+
 def public_watch_task(row: dict) -> dict:
     matched_seats = loads(row.get("matched_seats_json") or "[]") if row.get("matched_seats_json") else []
     reserve_url = local_reserve_path(row["room_id"], row["day"], matched_seats[0]) if matched_seats else ""
@@ -1795,6 +1869,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/chat/messages":
                 self.handle_chat_messages()
+                return
+            if path == "/api/chaoxing/transcript":
+                self.handle_chaoxing_transcript_history()
                 return
             if path.startswith("/api/history/"):
                 self.handle_history_detail(path)
@@ -2684,11 +2761,21 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             if user_id and session:
                 update_chaoxing_cookies(user_id, chaoxing.cookie_jar_to_json(session))
+            if user_id and result.get("pdf_url"):
+                save_academic_transcript(user_id, result["pdf_url"], student_info=result.get("student") or {}, max_keep=3)
+                result["transcripts"] = fetch_recent_academic_transcripts(user_id, limit=3)
             self.send_json(200, result)
         except Exception as exc:
             if user_id:
                 mark_chaoxing_error(user_id, str(exc))
             self.send_json(500, {"error": f"导出成绩单失败：{str(exc)}"})
+
+    def handle_chaoxing_transcript_history(self):
+        user = self.require_user()
+        if not user:
+            return
+        transcripts = fetch_recent_academic_transcripts(user["id"], limit=3)
+        self.send_json(200, {"ok": True, "transcripts": transcripts})
 
 
 ADMIN_HTML = r"""
@@ -4453,33 +4540,89 @@ INDEX_HTML = r"""
       color: var(--shelf-dark);
       margin: 0 0 12px;
     }
-    .transcript-student-meta {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-      gap: 10px;
-      margin-bottom: 16px;
+    .transcript-history-card {
+      margin-top: 14px;
     }
-    .transcript-meta-cell {
-      background: #f8fbf6;
+    .transcript-history-badge {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--shelf);
+      background: #e5f5eb;
+      border: 1px solid rgba(18, 141, 97, .2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .transcript-history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .transcript-history-item {
       border: 1px solid var(--soft-line);
       border-radius: 8px;
-      padding: 10px 12px;
+      background: #fbfdf9;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color .15s, background .15s;
     }
-    .transcript-meta-cell span {
-      display: block;
-      font-size: 11px;
+    .transcript-history-item:hover {
+      border-color: #c0d6c7;
+      background: #f6faf5;
+    }
+    .transcript-history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
       color: var(--muted);
-      margin-bottom: 4px;
-      font-weight: 600;
     }
-    .transcript-meta-cell b {
-      display: block;
-      font-size: 14px;
-      color: var(--ink);
-      font-weight: 800;
+    .transcript-history-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 750;
+      color: var(--shelf-dark);
+      font-size: 13px;
+    }
+    .transcript-history-time {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+    .transcript-history-link-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      background: #fff;
+      border: 1px solid var(--soft-line);
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .transcript-history-url {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--shelf);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      flex: 1;
+      min-width: 140px;
+    }
+    .transcript-history-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .transcript-history-actions a,
+    .transcript-history-actions button {
+      min-height: 28px;
+      padding: 4px 10px;
+      font-size: 12px;
     }
     .transcript-pdf-box {
       border: 1px solid #cce2d4;
@@ -4868,21 +5011,11 @@ INDEX_HTML = r"""
         <div id="transcriptEmpty" class="view-empty">
           <div>
             <b>还没有生成成绩单</b>
-            <span>点击上方“一键生成成绩单 PDF”，系统将自动从学习通官方获取您的学籍信息并生成最新 PDF 下载直链。</span>
+            <span>点击上方“一键生成成绩单 PDF”，系统将自动从学习通官方获取并生成最新 PDF 下载直链。</span>
           </div>
         </div>
 
         <div id="transcriptContent" class="transcript-card hidden">
-          <div class="transcript-card-title">学籍档案信息</div>
-          <div class="transcript-student-meta">
-            <div class="transcript-meta-cell"><span>学生姓名</span><b id="transcriptStudentName">-</b></div>
-            <div class="transcript-meta-cell"><span>学号</span><b id="transcriptStudentNo">-</b></div>
-            <div class="transcript-meta-cell"><span>班级</span><b id="transcriptStudentClass">-</b></div>
-            <div class="transcript-meta-cell"><span>院系</span><b id="transcriptStudentCollege">-</b></div>
-            <div class="transcript-meta-cell"><span>专业</span><b id="transcriptStudentMajor">-</b></div>
-            <div class="transcript-meta-cell"><span>学籍状态</span><b id="transcriptStudentStatus">-</b></div>
-          </div>
-
           <div class="transcript-pdf-box">
             <div class="transcript-pdf-header">
               <div class="transcript-pdf-title">
@@ -4900,6 +5033,14 @@ INDEX_HTML = r"""
               * 注：该 PDF 成绩单由超星教学管理服务大厅动态编译生成，包含完整成绩、学分与绩点统计。
             </div>
           </div>
+        </div>
+
+        <div id="transcriptHistoryCard" class="transcript-card transcript-history-card hidden">
+          <div class="transcript-card-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>历史生成记录</span>
+            <span class="transcript-history-badge">留存最近 3 条</span>
+          </div>
+          <div id="transcriptHistoryList" class="transcript-history-list"></div>
         </div>
       </section>
 
@@ -5197,16 +5338,12 @@ const transcriptFetchBtn = document.querySelector('#transcriptFetchBtn');
 const transcriptMessage = document.querySelector('#transcriptMessage');
 const transcriptEmpty = document.querySelector('#transcriptEmpty');
 const transcriptContent = document.querySelector('#transcriptContent');
-const transcriptStudentName = document.querySelector('#transcriptStudentName');
-const transcriptStudentNo = document.querySelector('#transcriptStudentNo');
-const transcriptStudentClass = document.querySelector('#transcriptStudentClass');
-const transcriptStudentCollege = document.querySelector('#transcriptStudentCollege');
-const transcriptStudentMajor = document.querySelector('#transcriptStudentMajor');
-const transcriptStudentStatus = document.querySelector('#transcriptStudentStatus');
 const transcriptPdfUrlDisplay = document.querySelector('#transcriptPdfUrlDisplay');
 const transcriptOpenBtn = document.querySelector('#transcriptOpenBtn');
 const transcriptCopyBtn = document.querySelector('#transcriptCopyBtn');
 const transcriptJumpBtn = document.querySelector('#transcriptJumpBtn');
+const transcriptHistoryCard = document.querySelector('#transcriptHistoryCard');
+const transcriptHistoryList = document.querySelector('#transcriptHistoryList');
 const historyModal = document.querySelector('#historyModal');
 const historyModalClose = document.querySelector('#historyModalClose');
 const historyModalTitle = document.querySelector('#historyModalTitle');
@@ -5284,6 +5421,9 @@ function switchAppView(targetId) {
     view.classList.toggle('hidden', view.id !== targetId);
   });
   setActiveDock(targetId);
+  if (targetId === 'transcriptSection') {
+    loadTranscriptHistory();
+  }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -5675,6 +5815,7 @@ function renderMe(data) {
   startWatchAlertStream();
   startCurrentReservesRefresh();
   updateOfficialLink();
+  loadTranscriptHistory();
   switchAppView('querySection');
 }
 
@@ -6206,6 +6347,53 @@ timetableFetchBtn.addEventListener('click', async () => {
 
 timetableDownloadBtn.addEventListener('click', downloadTimetableJson);
 
+function renderTranscriptHistory(items) {
+  if (!items || !items.length) {
+    if (transcriptHistoryCard) transcriptHistoryCard.classList.add('hidden');
+    return;
+  }
+  if (transcriptHistoryCard) transcriptHistoryCard.classList.remove('hidden');
+  if (transcriptHistoryList) {
+    transcriptHistoryList.innerHTML = items.map((item, index) => {
+      const time = escapeHtml(item.created_at || '');
+      const url = escapeHtml(item.pdf_url || '');
+      return `<div class="transcript-history-item">
+        <div class="transcript-history-header">
+          <span class="transcript-history-tag">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+            <span>成绩单 #${index + 1}</span>
+          </span>
+          <span class="transcript-history-time">${time}</span>
+        </div>
+        <div class="transcript-history-link-row">
+          <span class="transcript-history-url" title="${url}">${url}</span>
+          <div class="transcript-history-actions">
+            <a class="button-link" href="${url}" target="_blank" rel="noreferrer">打开</a>
+            <button class="ghost" type="button" data-copy-url="${url}">复制直链</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+}
+
+async function loadTranscriptHistory() {
+  try {
+    const data = await api('/api/chaoxing/transcript', { method: 'GET', headers: {} });
+    const items = data.transcripts || [];
+    renderTranscriptHistory(items);
+    if (items.length > 0) {
+      const latest = items[0];
+      if (transcriptPdfUrlDisplay) transcriptPdfUrlDisplay.textContent = latest.pdf_url;
+      if (transcriptOpenBtn) transcriptOpenBtn.href = latest.pdf_url;
+      if (transcriptEmpty) transcriptEmpty.classList.add('hidden');
+      if (transcriptContent) transcriptContent.classList.remove('hidden');
+    }
+  } catch {
+    // 忽略未登录或静默加载失败
+  }
+}
+
 if (transcriptJumpBtn) {
   transcriptJumpBtn.addEventListener('click', () => {
     switchAppView('transcriptSection');
@@ -6214,26 +6402,22 @@ if (transcriptJumpBtn) {
 
 if (transcriptFetchBtn) {
   transcriptFetchBtn.addEventListener('click', async () => {
-    setMessage(transcriptMessage, '正在从学习通官方获取学籍档案并生成成绩单 PDF（首次生成约需 5~15 秒），请耐心等待...');
+    setMessage(transcriptMessage, '正在从学习通官方生成成绩单 PDF（首次生成约需 5~15 秒），请耐心等待...');
     transcriptFetchBtn.disabled = true;
     try {
       const data = await api('/api/chaoxing/transcript', {
         method: 'POST',
         body: JSON.stringify({})
       });
-      if (transcriptStudentName) transcriptStudentName.textContent = data.student_name || '-';
-      if (transcriptStudentNo) transcriptStudentNo.textContent = data.student_no || '-';
-      if (transcriptStudentClass) transcriptStudentClass.textContent = data.student_class || '-';
-      if (transcriptStudentCollege) transcriptStudentCollege.textContent = data.student_college || '-';
-      if (transcriptStudentMajor) transcriptStudentMajor.textContent = data.student_major || '-';
-      if (transcriptStudentStatus) transcriptStudentStatus.textContent = data.student_status || '-';
 
       if (transcriptPdfUrlDisplay) transcriptPdfUrlDisplay.textContent = data.pdf_url;
       if (transcriptOpenBtn) transcriptOpenBtn.href = data.pdf_url;
 
       if (transcriptEmpty) transcriptEmpty.classList.add('hidden');
       if (transcriptContent) transcriptContent.classList.remove('hidden');
-      setMessage(transcriptMessage, '学业成绩单 PDF 已生成成功！', true);
+
+      renderTranscriptHistory(data.transcripts || []);
+      setMessage(transcriptMessage, '学业成绩单 PDF 已生成成功！已存入最近记录。', true);
     } catch (error) {
       setMessage(transcriptMessage, error.message);
     } finally {
@@ -6246,6 +6430,21 @@ if (transcriptCopyBtn) {
   transcriptCopyBtn.addEventListener('click', async () => {
     const url = transcriptPdfUrlDisplay ? transcriptPdfUrlDisplay.textContent.trim() : '';
     if (!url || url === '-' || url === '#') return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setMessage(transcriptMessage, 'PDF 直链已成功复制到剪贴板', true);
+    } catch {
+      setMessage(transcriptMessage, '复制失败，请手动长按选择复制');
+    }
+  });
+}
+
+if (transcriptHistoryList) {
+  transcriptHistoryList.addEventListener('click', async event => {
+    const btn = event.target.closest('[data-copy-url]');
+    if (!btn) return;
+    const url = btn.dataset.copyUrl;
+    if (!url) return;
     try {
       await navigator.clipboard.writeText(url);
       setMessage(transcriptMessage, 'PDF 直链已成功复制到剪贴板', true);

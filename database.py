@@ -213,6 +213,27 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS academic_transcripts (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT UNSIGNED NOT NULL,
+                    student_name VARCHAR(64) NULL,
+                    student_no VARCHAR(64) NULL,
+                    student_class VARCHAR(128) NULL,
+                    student_college VARCHAR(128) NULL,
+                    student_major VARCHAR(128) NULL,
+                    student_status VARCHAR(64) NULL,
+                    pdf_url TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY idx_academic_transcripts_user_created (user_id, created_at),
+                    CONSTRAINT fk_academic_transcripts_user
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:

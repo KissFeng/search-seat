@@ -87,6 +87,28 @@ class ChaoxingTranscriptTestCase(unittest.TestCase):
             self.assertEqual(result["student_name"], "测试学生")
             self.assertEqual(result["token"], "jwt_token_abc")
 
+    @patch("app.database")
+    def test_save_and_prune_academic_transcripts(self, mock_db):
+        import app
+
+        mock_db.execute.return_value = 42
+        mock_db.fetch_one.return_value = {
+            "id": 42,
+            "user_id": 1,
+            "pdf_url": "https://example.com/latest.pdf",
+            "created_at": "2026-09-09 16:00:00",
+        }
+        # 模拟第4条存在，返回超出的id
+        mock_db.fetch_all.return_value = [{"id": 10}]
+
+        item = app.save_academic_transcript(1, "https://example.com/latest.pdf", max_keep=3)
+        self.assertEqual(item["id"], 42)
+        self.assertEqual(item["pdf_url"], "https://example.com/latest.pdf")
+
+        # 检查是否执行了超出项删除
+        delete_calls = [c for c in mock_db.execute.call_args_list if "DELETE FROM academic_transcripts" in str(c)]
+        self.assertTrue(len(delete_calls) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
