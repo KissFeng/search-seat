@@ -452,18 +452,32 @@ def search_academic_student(session: requests.Session, token: str, student_no: s
     return data
 
 
-def export_academic_score_pdf(session: requests.Session, token: str, student_no: str) -> str:
+def export_academic_score_pdf(session: requests.Session, token: str, student_no: str, max_retries: int = 2) -> str:
     headers = build_shelf_headers(token)
     payload = {"checkedStudentNo": str(student_no).strip()}
-    resp = session.post(CHAOXING_SCORE_SINGLE_URL, headers=headers, json=payload, timeout=40)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("success", False) and data.get("code") != 200:
-        raise RuntimeError(data.get("msg") or "导出学业成绩单失败")
-    pdf_url = data.get("data")
-    if not pdf_url or not isinstance(pdf_url, str) or not pdf_url.startswith("http"):
-        raise RuntimeError(f"成绩单接口未返回有效的 PDF URL：{data}")
-    return pdf_url
+    last_exc = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = session.post(CHAOXING_SCORE_SINGLE_URL, headers=headers, json=payload, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("success", False) and data.get("code") != 200:
+                raise RuntimeError(data.get("msg") or "导出学业成绩单失败")
+            pdf_url = data.get("data")
+            if not pdf_url or not isinstance(pdf_url, str) or not pdf_url.startswith("http"):
+                raise RuntimeError(f"成绩单接口未返回有效的 PDF URL：{data}")
+            return pdf_url
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(1.5)
+                continue
+            raise RuntimeError("学习通成绩单服务端生成超时，通常是由于学习通排队渲染 PDF 耗时较长，请稍等片刻后重试") from exc
+        except Exception:
+            raise
+
+    raise RuntimeError("导出学业成绩单失败：已超出最大重试次数") from last_exc
 
 
 def fetch_transcript_pdf_url(

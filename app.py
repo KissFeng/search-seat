@@ -6072,7 +6072,7 @@ if (transcriptModalClose) {
 if (transcriptModalForm) {
   transcriptModalForm.addEventListener('submit', async event => {
     event.preventDefault();
-    setMessage(transcriptModalMessage, '正在生成学业成绩单 PDF，请稍候...');
+    setMessage(transcriptModalMessage, '正在请求学习通生成成绩单 PDF（生成通常耗时 5~15 秒），请耐心等待...');
     transcriptModalSubmitBtn.disabled = true;
     transcriptModalResult.classList.add('hidden');
     try {
