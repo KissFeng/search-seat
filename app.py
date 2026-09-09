@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError, dumps, loads
 import hashlib
 import hmac
+import html
 import os
 import queue
 import threading
@@ -1805,7 +1806,30 @@ class AppHandler(BaseHTTPRequestHandler):
         path = parsed.path
         try:
             if path == "/":
-                self.send_body(200, INDEX_HTML)
+                user = self.current_user()
+                html_body = INDEX_HTML
+                if user:
+                    html_body = html_body.replace(
+                        '<section id="authPanel" class="auth">',
+                        '<section id="authPanel" class="auth hidden">',
+                    )
+                    html_body = html_body.replace(
+                        '<div id="appPanel" class="hidden">',
+                        '<div id="appPanel">',
+                    )
+                    html_body = html_body.replace(
+                        '<div id="topUser" class="row hidden">',
+                        '<div id="topUser" class="row">',
+                    )
+                    html_body = html_body.replace(
+                        '<span class="muted" id="username"></span>',
+                        f'<span class="muted" id="username">{html.escape(user["username"])}</span>',
+                    )
+                self.send_body(
+                    200,
+                    html_body,
+                    headers=[("Cache-Control", "no-cache, no-store, must-revalidate")],
+                )
                 return
             if path == "/admin":
                 self.send_body(200, ADMIN_HTML)
@@ -5355,6 +5379,9 @@ function switchAppView(targetId) {
     view.classList.toggle('hidden', view.id !== targetId);
   });
   setActiveDock(targetId);
+  try {
+    sessionStorage.setItem('activeAppView', targetId);
+  } catch {}
   if (targetId === 'transcriptSection') {
     loadTranscriptHistory();
   }
@@ -5750,7 +5777,11 @@ function renderMe(data) {
   startCurrentReservesRefresh();
   updateOfficialLink();
   loadTranscriptHistory();
-  switchAppView('querySection');
+  let savedView = null;
+  try {
+    savedView = sessionStorage.getItem('activeAppView');
+  } catch {}
+  switchAppView(savedView || 'querySection');
 }
 
 function updateOfficialLink() {
@@ -6150,6 +6181,9 @@ document.querySelector('#logoutBtn').addEventListener('click', async () => {
   if (window.SearchSeatAndroid && typeof window.SearchSeatAndroid.getGetuiClientId === 'function') {
     payload.cid = window.SearchSeatAndroid.getGetuiClientId();
   }
+  try {
+    sessionStorage.removeItem('activeAppView');
+  } catch {}
   await api('/api/logout', { method: 'POST', body: JSON.stringify(payload) });
   location.reload();
 });
@@ -6467,6 +6501,12 @@ watchAlertConfirm.addEventListener('click', async () => {
 });
 
 setTimeOptions();
+try {
+  const savedView = sessionStorage.getItem('activeAppView');
+  if (savedView && document.querySelector(`#${savedView}`)) {
+    switchAppView(savedView);
+  }
+} catch {}
 loadMe().then(async data => {
   if (!authPanel.classList.contains('hidden')) return;
   await loadHistory();
