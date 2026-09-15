@@ -279,10 +279,26 @@ def timetable_week_num_from_payload(payload: dict) -> str:
     return week_num
 
 
+def room_seat_config(room: dict) -> tuple:
+    seat_min = int(room.get("seat_min") or config.SEAT_MIN)
+    seat_max = int(room.get("seat_max") or config.SEAT_MAX)
+    seat_width = int(room.get("seat_width") or config.SEAT_WIDTH)
+    if seat_min < 1 or seat_max < seat_min:
+        raise ValueError("座位号范围不正确")
+    if seat_width < 1 or seat_width > 8:
+        raise ValueError("座位号补零宽度不正确")
+    return seat_min, seat_max, seat_width
+
+
 def public_room(room: dict) -> dict:
+    seat_min, seat_max, seat_width = room_seat_config(room)
     return {
         "label": room["label"],
-        "room_id": room["room_id"],
+        "room_id": str(room["room_id"]),
+        "seat_min": seat_min,
+        "seat_max": seat_max,
+        "seat_width": seat_width,
+        "seat_count": seat_max - seat_min + 1,
     }
 
 
@@ -455,17 +471,6 @@ def filter_unwanted_seats(room_id: str, available: list, width: int, payload: di
 
 def truthy(value) -> bool:
     return value in (True, 1, "1", "true", "on", "yes")
-
-
-def room_seat_config(room: dict) -> tuple:
-    seat_min = int(room.get("seat_min") or config.SEAT_MIN)
-    seat_max = int(room.get("seat_max") or config.SEAT_MAX)
-    seat_width = int(room.get("seat_width") or config.SEAT_WIDTH)
-    if seat_min < 1 or seat_max < seat_min:
-        raise ValueError("座位号范围不正确")
-    if seat_width < 1 or seat_width > 8:
-        raise ValueError("座位号补零宽度不正确")
-    return seat_min, seat_max, seat_width
 
 
 def watch_expires_at(day: str, start_time: str) -> datetime:
@@ -1817,13 +1822,15 @@ class AppHandler(BaseHTTPRequestHandler):
                         '<div id="appPanel" class="hidden">',
                         '<div id="appPanel">',
                     )
+                    cx = get_chaoxing_session(user["id"])
+                    display_name = (cx and cx.get("cx_user_name")) or user["username"]
                     html_body = html_body.replace(
                         '<div id="topUser" class="row hidden">',
                         '<div id="topUser" class="row">',
                     )
                     html_body = html_body.replace(
-                        '<span class="muted" id="username"></span>',
-                        f'<span class="muted" id="username">{html.escape(user["username"])}</span>',
+                        '<span id="username"></span>',
+                        f'<span id="username">{html.escape(display_name)}</span>',
                     )
                 self.send_body(
                     200,
@@ -1836,6 +1843,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/reserve":
                 self.handle_reserve_redirect(parsed.query)
+                return
+            if path == "/checkin":
+                self.handle_checkin_redirect(parsed.query)
                 return
             if path == "/api/admin/me":
                 self.handle_admin_me()
@@ -1912,6 +1922,16 @@ class AppHandler(BaseHTTPRequestHandler):
         day = validate_day((params.get("day") or [datetime.now().strftime("%Y-%m-%d")])[0])
         seat = (params.get("seat") or [""])[0]
         target = chaoxing.build_reserve_url(str(room["room_id"]), str(room["fid_enc"]), day, seat)
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def handle_checkin_redirect(self, query: str):
+        params = parse_qs(query)
+        room = get_room((params.get("room_id") or [config.ROOMS[0]["room_id"]])[0])
+        seat = (params.get("seat") or [""])[0]
+        target = checkin_url(str(room["room_id"]), seat)
         self.send_response(302)
         self.send_header("Location", target)
         self.send_header("Content-Length", "0")
@@ -2300,13 +2320,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
         cx = get_chaoxing_session(user["id"])
         settings = get_user_settings(user["id"])
+        display_name = (cx and cx.get("cx_user_name")) or user["username"]
         self.send_json(
             200,
             {
-                "user": user,
+                "user": {
+                    **user,
+                    "name": display_name,
+                },
                 "chaoxing": {
                     "bound": bool(cx),
                     "account": cx["cx_account"] if cx else "",
+                    "user_name": (cx and cx.get("cx_user_name")) or "",
                     "session_valid": bool(cx["session_valid"]) if cx else False,
                     "last_error": cx["last_error"] if cx else "",
                     "cookies_updated_at": cx["cookies_updated_at"] if cx else "",
@@ -4056,6 +4081,18 @@ INDEX_HTML = r"""
       font: 800 10px/1 var(--mono-font);
       box-shadow: inset 0 -3px 0 rgba(0, 0, 0, .16);
     }
+    #topUser {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    #username {
+      font-size: 14px;
+      font-weight: 750;
+      color: var(--shelf-dark);
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
     main {
       position: relative;
       width: min(1420px, calc(100vw - 32px));
@@ -4731,11 +4768,11 @@ INDEX_HTML = r"""
     }
     @media (max-width: 820px) {
       body { background-size: 28px 28px, 28px 28px, auto; }
-      header { padding: 9px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); align-items: flex-start; min-height: 64px; }
-      h1 { line-height: 36px; font-size: 16px; }
+      header { padding: 9px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); align-items: center; min-height: 56px; }
+      h1 { line-height: 36px; font-size: 15px; }
       h1::before { width: 36px; height: 28px; font-size: 9px; }
-      #topUser { justify-content: flex-end; gap: 8px; }
-      #username { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #topUser { justify-content: flex-end; gap: 8px; align-items: center; }
+      #username { max-width: 32vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; color: var(--shelf-dark); }
       main { width: calc(100vw - 16px); padding: 12px 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
       section { padding: 14px; margin-bottom: 10px; }
       form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -4822,7 +4859,7 @@ INDEX_HTML = r"""
   <header>
     <h1>工职大座位雷达</h1>
     <div id="topUser" class="row hidden">
-      <span class="muted" id="username"></span>
+      <span id="username"></span>
       <button class="ghost" id="logoutBtn" type="button">退出</button>
     </div>
   </header>
@@ -4855,7 +4892,15 @@ INDEX_HTML = r"""
             <div class="reserve-empty">正在读取预约</div>
           </div>
         </div>
-        <h2>座位查询</h2>
+        <div class="section-head">
+          <h2>座位查询</h2>
+          <div class="section-actions">
+            <button class="ghost" id="openRoomSeatsBtn" type="button" style="min-height: 34px; padding: 5px 12px; gap: 6px;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+              <span>空间座位签到</span>
+            </button>
+          </div>
+        </div>
         <form id="queryForm">
           <label>房间
             <select name="room_id" required></select>
@@ -4880,6 +4925,32 @@ INDEX_HTML = r"""
           <button type="submit">查询可预约座位</button>
         </form>
         <div class="message" id="queryMessage"></div>
+      </section>
+
+      <section id="roomSeatsSection" class="app-view hidden" data-app-view>
+        <div class="section-head">
+          <div>
+            <h2>空间座位签到</h2>
+            <div class="muted">选择房间楼层，点击座位号即可直达对应座位的超星签到页面</div>
+          </div>
+          <div class="section-actions">
+            <button class="text-button" id="roomSeatsBackBtn" type="button">← 返回查询</button>
+          </div>
+        </div>
+
+        <div class="tabs" id="roomSeatTabs" style="display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px; width: 100%; margin-bottom: 14px;"></div>
+
+        <div class="statusbar" style="margin-bottom: 12px; padding: 12px; border: 1px solid var(--soft-line); border-radius: 8px; background: #fff; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <span id="roomSeatCurrentLabel" style="font-weight: 850; font-size: 15px; color: var(--shelf-dark);">2F-阅览区</span>
+            <span class="muted" id="roomSeatCurrentMeta" style="margin-left: 8px;">共 371 个座位 (001 ~ 371)</span>
+          </div>
+          <div class="row" style="gap: 10px;">
+            <input type="search" id="roomSeatSearch" placeholder="搜索座号 (如 058)..." style="min-height: 32px; padding: 4px 8px; width: 160px;">
+          </div>
+        </div>
+
+        <div id="roomSeatGrid" class="seat-grid"></div>
       </section>
 
       <section id="resultsPanel" class="app-view hidden" data-app-view>
@@ -5324,6 +5395,14 @@ const startWatchContinue = document.querySelector('#startWatchContinue');
 const disclaimerModal = document.querySelector('#disclaimerModal');
 const disclaimerCancel = document.querySelector('#disclaimerCancel');
 const disclaimerAccept = document.querySelector('#disclaimerAccept');
+const openRoomSeatsBtn = document.querySelector('#openRoomSeatsBtn');
+const roomSeatsSection = document.querySelector('#roomSeatsSection');
+const roomSeatsBackBtn = document.querySelector('#roomSeatsBackBtn');
+const roomSeatTabs = document.querySelector('#roomSeatTabs');
+const roomSeatCurrentLabel = document.querySelector('#roomSeatCurrentLabel');
+const roomSeatCurrentMeta = document.querySelector('#roomSeatCurrentMeta');
+const roomSeatSearch = document.querySelector('#roomSeatSearch');
+const roomSeatGrid = document.querySelector('#roomSeatGrid');
 const dockItems = Array.from(document.querySelectorAll('.dock-item'));
 const appViews = Array.from(document.querySelectorAll('[data-app-view]'));
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
@@ -5331,6 +5410,15 @@ const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
 const CURRENT_RESERVES_REFRESH_MS = 10000;
 const CHAT_REFRESH_MS = 3000;
+const ROOM_DISPLAY_ORDER = ['12818', '11226', '12819', '12820'];
+const DEFAULT_ROOMS_FALLBACK = [
+  { label: '2F-阅览区', room_id: '12818', seat_min: 1, seat_max: 371, seat_width: 3 },
+  { label: '2F-24H借阅空间', room_id: '11226', seat_min: 1, seat_max: 117, seat_width: 3 },
+  { label: '3F-阅览区', room_id: '12819', seat_min: 1, seat_max: 299, seat_width: 3 },
+  { label: '4F-阅览区', room_id: '12820', seat_min: 1, seat_max: 282, seat_width: 3 },
+];
+let availableRooms = [...DEFAULT_ROOMS_FALLBACK];
+let activeRoomSeatId = '12818';
 let latestResult = null;
 let latestTimetable = null;
 let officialIndexUrl = '';
@@ -5372,18 +5460,87 @@ function setActiveDock(targetId) {
   });
 }
 
+function renderRoomSeatTabs() {
+  if (!roomSeatTabs) return;
+  const sortedRooms = [...availableRooms].sort((a, b) => {
+    const idxA = ROOM_DISPLAY_ORDER.indexOf(String(a.room_id));
+    const idxB = ROOM_DISPLAY_ORDER.indexOf(String(b.room_id));
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    return 0;
+  });
+  roomSeatTabs.innerHTML = sortedRooms.map(room =>
+    `<button class="tab ${String(room.room_id) === String(activeRoomSeatId) ? 'active' : ''}" type="button" data-room-id="${escapeHtml(room.room_id)}" style="min-height: 40px; font-weight: 800; font-size: 14px;">${escapeHtml(room.label)}</button>`
+  ).join('');
+
+  Array.from(roomSeatTabs.querySelectorAll('.tab')).forEach(tab => {
+    tab.addEventListener('click', () => {
+      const roomId = tab.dataset.roomId;
+      if (roomId && roomId !== activeRoomSeatId) {
+        activeRoomSeatId = roomId;
+        renderRoomSeatTabs();
+        renderRoomSeats();
+      }
+    });
+  });
+}
+
+function renderRoomSeats() {
+  if (!roomSeatGrid) return;
+  const currentRoom = availableRooms.find(r => String(r.room_id) === String(activeRoomSeatId)) || availableRooms[0];
+  if (!currentRoom) return;
+
+  const min = Number(currentRoom.seat_min || 1);
+  const max = Number(currentRoom.seat_max || 1);
+  const width = Number(currentRoom.seat_width || 3);
+  const total = max - min + 1;
+  const minPad = String(min).padStart(width, '0');
+  const maxPad = String(max).padStart(width, '0');
+
+  if (roomSeatCurrentLabel) {
+    roomSeatCurrentLabel.textContent = currentRoom.label;
+  }
+  if (roomSeatCurrentMeta) {
+    roomSeatCurrentMeta.textContent = `共 ${total} 个座位 (${minPad} ~ ${maxPad})`;
+  }
+
+  const queryKeyword = (roomSeatSearch?.value || '').trim();
+  const seats = [];
+  for (let i = min; i <= max; i++) {
+    const seatNum = String(i).padStart(width, '0');
+    if (!queryKeyword || seatNum.includes(queryKeyword)) {
+      seats.push(seatNum);
+    }
+  }
+
+  if (seats.length === 0) {
+    roomSeatGrid.innerHTML = '<div class="muted" style="padding: 16px; grid-column: 1 / -1; text-align: center;">未找到匹配的座位号</div>';
+    return;
+  }
+
+  roomSeatGrid.innerHTML = seats.map(seat => {
+    const checkinUrl = `https://office.chaoxing.com/front/apps/seat/code?id=${encodeURIComponent(currentRoom.room_id)}&seatNum=${encodeURIComponent(seat)}`;
+    return `<a class="seat" href="${checkinUrl}" target="_blank" rel="noreferrer" title="进入 ${escapeHtml(currentRoom.label)} ${escapeHtml(seat)} 签到页面">${escapeHtml(seat)}</a>`;
+  }).join('');
+}
+
 function switchAppView(targetId) {
   const target = document.querySelector(`#${targetId}`);
   if (!target) return;
   appViews.forEach(view => {
     view.classList.toggle('hidden', view.id !== targetId);
   });
-  setActiveDock(targetId);
+  setActiveDock(targetId === 'roomSeatsSection' ? 'querySection' : targetId);
   try {
     sessionStorage.setItem('activeAppView', targetId);
   } catch {}
   if (targetId === 'transcriptSection') {
     loadTranscriptHistory();
+  }
+  if (targetId === 'roomSeatsSection') {
+    renderRoomSeatTabs();
+    renderRoomSeats();
   }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -5731,6 +5888,16 @@ function syncEndTimeOptions(preferredEnd) {
 }
 
 function fillDefaults(defaults) {
+  if (Array.isArray(defaults.rooms) && defaults.rooms.length > 0) {
+    availableRooms = defaults.rooms.map(room => ({
+      label: room.label,
+      room_id: String(room.room_id),
+      seat_min: Number(room.seat_min || 1),
+      seat_max: Number(room.seat_max || 100),
+      seat_width: Number(room.seat_width || 3),
+      seat_count: Number(room.seat_count || 0),
+    }));
+  }
   const roomOptions = defaults.rooms.map(room =>
     `<option value="${escapeHtml(room.room_id)}">${escapeHtml(room.label)}</option>`
   ).join('');
@@ -5742,6 +5909,8 @@ function fillDefaults(defaults) {
   updateWebhookSummary();
   officialIndexUrl = defaults.official_index_url || '';
   updateOfficialLink();
+  renderRoomSeatTabs();
+  renderRoomSeats();
 }
 
 function renderMe(data) {
@@ -5759,7 +5928,7 @@ function renderMe(data) {
   authPanel.classList.add('hidden');
   appPanel.classList.remove('hidden');
   topUser.classList.remove('hidden');
-  username.textContent = data.user.username;
+  username.textContent = data.chaoxing?.user_name || data.user?.name || data.user?.username || '姓名';
   fillDefaults(data.defaults);
   if (data.chaoxing.bound) {
     const validText = data.chaoxing.session_valid ? '已保存 Cookie' : 'Cookie 可能已失效';
@@ -6238,6 +6407,32 @@ startWatchCancel.addEventListener('click', () => resolveStartWatch(false));
 startWatchContinue.addEventListener('click', () => resolveStartWatch(true));
 disclaimerCancel.addEventListener('click', () => resolveDisclaimer(false));
 disclaimerAccept.addEventListener('click', () => resolveDisclaimer(true));
+
+if (openRoomSeatsBtn) {
+  openRoomSeatsBtn.addEventListener('click', () => {
+    if (queryForm?.room_id?.value) {
+      activeRoomSeatId = queryForm.room_id.value;
+    }
+    renderRoomSeatTabs();
+    renderRoomSeats();
+    switchAppView('roomSeatsSection');
+  });
+}
+
+if (roomSeatsBackBtn) {
+  roomSeatsBackBtn.addEventListener('click', () => {
+    if (activeRoomSeatId && queryForm?.room_id) {
+      queryForm.room_id.value = activeRoomSeatId;
+    }
+    switchAppView('querySection');
+  });
+}
+
+if (roomSeatSearch) {
+  roomSeatSearch.addEventListener('input', () => {
+    renderRoomSeats();
+  });
+}
 
 queryForm.addEventListener('input', updateOfficialLink);
 queryForm.addEventListener('change', event => {

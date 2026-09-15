@@ -56,9 +56,9 @@ SEAT_WIDTH = get_int_env("SEAT_WIDTH", 3)
 
 DEFAULT_ROOMS = [
     {"label": "2F-阅览区", "room_id": "12818", "fid_enc": FID_ENC, "seat_min": 1, "seat_max": 371, "seat_width": 3},
+    {"label": "2F-24H借阅空间", "room_id": "11226", "fid_enc": FID_ENC, "seat_min": 1, "seat_max": 117, "seat_width": 3},
     {"label": "3F-阅览区", "room_id": "12819", "fid_enc": FID_ENC, "seat_min": 1, "seat_max": 299, "seat_width": 3},
     {"label": "4F-阅览区", "room_id": "12820", "fid_enc": FID_ENC, "seat_min": 1, "seat_max": 282, "seat_width": 3},
-    {"label": "2F-24H借阅空间", "room_id": "11226", "fid_enc": FID_ENC, "seat_min": 1, "seat_max": 117, "seat_width": 3},
 ]
 
 
