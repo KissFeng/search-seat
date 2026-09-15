@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${JAVA_HOME:-}" ]] && command -v /usr/libexec/java_home >/dev/null 2>&1; then
+  DETECTED_JAVA="$(/usr/libexec/java_home -v 17 2>/dev/null || /usr/libexec/java_home -v 11 2>/dev/null || true)"
+  if [[ -n "$DETECTED_JAVA" ]]; then
+    export JAVA_HOME="$DETECTED_JAVA"
+    export PATH="$JAVA_HOME/bin:$PATH"
+  fi
+fi
+
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$ROOT_DIR/app"
 BUILD_DIR="$ROOT_DIR/build"

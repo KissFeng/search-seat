@@ -8,6 +8,7 @@ import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -25,6 +26,7 @@ import android.os.Message;
 import android.os.VibrationEffect;
 import android.os.VibrationAttributes;
 import android.os.Vibrator;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -32,7 +34,9 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.SslErrorHandler;
+import android.webkit.ValueCallback;
 import android.webkit.GeolocationPermissions;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -62,7 +66,9 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
@@ -74,6 +80,12 @@ public class MainActivity extends Activity {
     private static final String NOTIFICATION_CHANNEL_ID = GetuiPushBridge.NOTIFICATION_CHANNEL_ID;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 42;
     private static final int LOCATION_PERMISSION_REQUEST = 43;
+    private static final int CAMERA_PERMISSION_REQUEST = 44;
+    private static final int WEB_PERMISSION_REQUEST = 45;
+    private static final int FILE_CHOOSER_REQUEST = 46;
+    private static final double MOCK_LATITUDE = 37.978611;
+    private static final double MOCK_LONGITUDE = 114.452778;
+    private static final String CAMERA_PHOTO_FILE_NAME = "camera_capture.jpg";
     private static final long ALERT_POLL_INTERVAL_MS = 5000L;
     private static final long[] NOTIFICATION_VIBRATION_PATTERN = new long[]{0, 260, 130, 260};
     private static final int[] NOTIFICATION_VIBRATION_AMPLITUDES = new int[]{0, 255, 0, 255};
@@ -91,6 +103,10 @@ public class MainActivity extends Activity {
     private JSONObject pendingInstallUpdate = null;
     private GeolocationPermissions.Callback pendingGeolocationCallback = null;
     private String pendingGeolocationOrigin = null;
+    private PermissionRequest pendingWebPermissionRequest = null;
+    private ValueCallback<Uri[]> pendingFilePathCallback = null;
+    private WebChromeClient.FileChooserParams pendingFileChooserParams = null;
+    private Uri pendingCameraPhotoUri = null;
     private File pendingInstallApk = null;
     private boolean chaoxingCookieSyncInFlight = false;
 
@@ -265,8 +281,8 @@ public class MainActivity extends Activity {
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setGeolocationEnabled(true);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             cookieManager.setAcceptThirdPartyCookies(webView, true);
@@ -335,7 +351,197 @@ public class MainActivity extends Activity {
             pendingGeolocationCallback.invoke(pendingGeolocationOrigin, granted, false);
             pendingGeolocationCallback = null;
             pendingGeolocationOrigin = null;
+        } else if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            boolean granted = false;
+            for (int result : grantResults) {
+                if (result == PackageManager.PERMISSION_GRANTED) {
+                    granted = true;
+                    break;
+                }
+            }
+            if (granted) {
+                launchFileChooser(pendingFileChooserParams);
+            } else {
+                launchFileChooserFallback(pendingFileChooserParams);
+            }
+        } else if (requestCode == WEB_PERMISSION_REQUEST) {
+            if (pendingWebPermissionRequest != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    List<String> grantedResources = new ArrayList<>();
+                    for (String res : pendingWebPermissionRequest.getResources()) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                grantedResources.add(res);
+                            }
+                        } else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                grantedResources.add(res);
+                            }
+                        } else {
+                            grantedResources.add(res);
+                        }
+                    }
+                    if (!grantedResources.isEmpty()) {
+                        pendingWebPermissionRequest.grant(grantedResources.toArray(new String[0]));
+                    } else {
+                        pendingWebPermissionRequest.deny();
+                    }
+                }
+                pendingWebPermissionRequest = null;
+            }
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            if (pendingFilePathCallback == null) {
+                return;
+            }
+            Uri[] results = null;
+            if (resultCode == Activity.RESULT_OK) {
+                if (data != null && (data.getData() != null || data.getClipData() != null)) {
+                    if (data.getClipData() != null) {
+                        ClipData clipData = data.getClipData();
+                        int count = clipData.getItemCount();
+                        results = new Uri[count];
+                        for (int i = 0; i < count; i++) {
+                            results[i] = clipData.getItemAt(i).getUri();
+                        }
+                    } else if (data.getData() != null) {
+                        results = new Uri[]{data.getData()};
+                    }
+                } else if (pendingCameraPhotoUri != null) {
+                    File photoFile = new File(getCacheDir(), CAMERA_PHOTO_FILE_NAME);
+                    if (photoFile.exists() && photoFile.length() > 0) {
+                        results = new Uri[]{pendingCameraPhotoUri};
+                    }
+                }
+            }
+            pendingFilePathCallback.onReceiveValue(results);
+            pendingFilePathCallback = null;
+            pendingFileChooserParams = null;
+        }
+    }
+
+    private void launchFileChooser(WebChromeClient.FileChooserParams params) {
+        File photoFile = new File(getCacheDir(), CAMERA_PHOTO_FILE_NAME);
+        try {
+            if (photoFile.exists()) {
+                photoFile.delete();
+            }
+            photoFile.createNewFile();
+        } catch (Exception ignored) {
+        }
+        pendingCameraPhotoUri = Uri.parse("content://" + CameraFileProvider.AUTHORITY + "/" + CAMERA_PHOTO_FILE_NAME);
+
+        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraPhotoUri);
+        takePictureIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        Intent contentSelectionIntent = null;
+        if (params != null) {
+            try {
+                contentSelectionIntent = params.createIntent();
+            } catch (Exception ignored) {
+            }
+        }
+        if (contentSelectionIntent == null) {
+            contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
+            contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
+            contentSelectionIntent.setType("*/*");
+        }
+
+        boolean canCapture = takePictureIntent.resolveActivity(getPackageManager()) != null;
+        boolean isCaptureOnly = params != null && params.isCaptureEnabled();
+
+        Intent targetIntent;
+        if (isCaptureOnly && canCapture) {
+            targetIntent = takePictureIntent;
+        } else {
+            targetIntent = Intent.createChooser(contentSelectionIntent, "选择操作");
+            if (canCapture) {
+                targetIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{takePictureIntent});
+            }
+        }
+
+        try {
+            startActivityForResult(targetIntent, FILE_CHOOSER_REQUEST);
+        } catch (Exception e) {
+            if (pendingFilePathCallback != null) {
+                pendingFilePathCallback.onReceiveValue(null);
+                pendingFilePathCallback = null;
+            }
+            Toast.makeText(this, "无法调起相机或文件选择器", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void launchFileChooserFallback(WebChromeClient.FileChooserParams params) {
+        Intent contentSelectionIntent = null;
+        if (params != null) {
+            try {
+                contentSelectionIntent = params.createIntent();
+            } catch (Exception ignored) {
+            }
+        }
+        if (contentSelectionIntent == null) {
+            contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
+            contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
+            contentSelectionIntent.setType("image/*");
+        }
+        try {
+            startActivityForResult(Intent.createChooser(contentSelectionIntent, "选择照片"), FILE_CHOOSER_REQUEST);
+        } catch (Exception e) {
+            if (pendingFilePathCallback != null) {
+                pendingFilePathCallback.onReceiveValue(null);
+                pendingFilePathCallback = null;
+            }
+        }
+    }
+
+    private String getMockGeolocationScript() {
+        return "(function() {" +
+                "var lat = " + MOCK_LATITUDE + ";" +
+                "var lng = " + MOCK_LONGITUDE + ";" +
+                "var accuracy = 15.0;" +
+                "function makePos() {" +
+                "  return {" +
+                "    coords: {" +
+                "      latitude: lat," +
+                "      longitude: lng," +
+                "      accuracy: accuracy," +
+                "      altitude: 68.0," +
+                "      altitudeAccuracy: 5.0," +
+                "      heading: 0.0," +
+                "      speed: 0.0" +
+                "    }," +
+                "    timestamp: Date.now()" +
+                "  };" +
+                "}" +
+                "if (!navigator.geolocation) {" +
+                "  navigator.geolocation = {};" +
+                "}" +
+                "navigator.geolocation.getCurrentPosition = function(success, error, options) {" +
+                "  if (typeof success === 'function') {" +
+                "    setTimeout(function() { success(makePos()); }, 10);" +
+                "  }" +
+                "};" +
+                "navigator.geolocation.watchPosition = function(success, error, options) {" +
+                "  if (typeof success === 'function') {" +
+                "    setTimeout(function() { success(makePos()); }, 10);" +
+                "  }" +
+                "  return 1;" +
+                "};" +
+                "navigator.geolocation.clearWatch = function(id) {};" +
+                "if (window.jsAndroid) {" +
+                "  window.jsAndroid.locationService = function() {" +
+                "    if (typeof window.receiveMsgFromNative === 'function') {" +
+                "      window.receiveMsgFromNative(JSON.stringify({latitude: lat, longitude: lng, accuracy: accuracy, status: 1}));" +
+                "    }" +
+                "  };" +
+                "}" +
+                "})();";
     }
 
     private void startNativeAlertPolling() {
@@ -1026,6 +1232,7 @@ public class MainActivity extends Activity {
             errorView.setVisibility(View.GONE);
             progressBar.setVisibility(View.VISIBLE);
             progressBar.setProgress(8);
+            view.evaluateJavascript(getMockGeolocationScript(), null);
             Uri uri = Uri.parse(url);
             if (prepareChaoxingCookiesThenLoad(uri)) {
                 view.stopLoading();
@@ -1041,6 +1248,7 @@ public class MainActivity extends Activity {
             flushCookies();
             GetuiPushBridge.syncClientIdInBackground(MainActivity.this);
             progressBar.setVisibility(View.GONE);
+            view.evaluateJavascript(getMockGeolocationScript(), null);
         }
 
         @Override
@@ -1097,13 +1305,64 @@ public class MainActivity extends Activity {
 
         @Override
         public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-            if (hasLocationPermission()) {
-                callback.invoke(origin, true, false);
-            } else {
-                pendingGeolocationCallback = callback;
-                pendingGeolocationOrigin = origin;
-                requestLocationPermission();
+            callback.invoke(origin, true, false);
+        }
+
+        @Override
+        public void onPermissionRequest(final PermissionRequest request) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                return;
             }
+            runOnUiThread(() -> {
+                String[] resources = request.getResources();
+                List<String> neededPermissions = new ArrayList<>();
+                for (String res : resources) {
+                    if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                            neededPermissions.add(Manifest.permission.CAMERA);
+                        }
+                    } else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            neededPermissions.add(Manifest.permission.RECORD_AUDIO);
+                        }
+                    }
+                }
+
+                if (neededPermissions.isEmpty()) {
+                    request.grant(resources);
+                } else {
+                    if (pendingWebPermissionRequest != null) {
+                        pendingWebPermissionRequest.deny();
+                    }
+                    pendingWebPermissionRequest = request;
+                    requestPermissions(neededPermissions.toArray(new String[0]), WEB_PERMISSION_REQUEST);
+                }
+            });
+        }
+
+        @Override
+        public void onPermissionRequestCanceled(PermissionRequest request) {
+            if (pendingWebPermissionRequest != null && pendingWebPermissionRequest.equals(request)) {
+                pendingWebPermissionRequest = null;
+            }
+        }
+
+        @Override
+        public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+            if (pendingFilePathCallback != null) {
+                pendingFilePathCallback.onReceiveValue(null);
+                pendingFilePathCallback = null;
+            }
+            pendingFilePathCallback = filePathCallback;
+            pendingFileChooserParams = fileChooserParams;
+
+            if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
+                return true;
+            }
+
+            launchFileChooser(fileChooserParams);
+            return true;
         }
 
         @Override

@@ -1,8 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.searchseat.webview"
-    android:versionCode="14"
-    android:versionName="2.3">
+    android:versionCode="15"
+    android:versionName="2.4">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -13,6 +15,9 @@
     <uses-permission android:name="android.permission.GET_TASKS" />
     <uses-permission android:name="com.vivo.notification.permission.BADGE_ICON" />
     <uses-permission android:name="getui.permission.GetuiService.com.searchseat.webview" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <permission
         android:name="getui.permission.GetuiService.com.searchseat.webview"
@@ -66,6 +71,11 @@
         <provider
             android:name=".ApkContentProvider"
             android:authorities="com.searchseat.webview.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <provider
+            android:name=".CameraFileProvider"
+            android:authorities="com.searchseat.webview.camerafileprovider"
             android:exported="false"
             android:grantUriPermissions="true" />
         <provider
