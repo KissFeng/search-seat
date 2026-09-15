@@ -238,10 +238,13 @@ class AppHandler(BaseHTTPRequestHandler):
                         '<span id="username"></span>',
                         f'<span id="username">{html.escape(display_name)}</span>',
                     )
+                page_headers = [("Cache-Control", "no-cache, no-store, must-revalidate")]
+                if user:
+                    page_headers.append(("Set-Cookie", auth.make_session_cookie(user["id"])))
                 self.send_body(
                     200,
                     html_body,
-                    headers=[("Cache-Control", "no-cache, no-store, must-revalidate")],
+                    headers=page_headers,
                 )
                 return
             if path == "/admin":
@@ -733,6 +736,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "default_webhook_url": settings.get("default_webhook_url") or config.NOTIFY_WEBHOOK_URL or "",
                 },
             },
+            headers=[("Set-Cookie", auth.make_session_cookie(user["id"]))],
         )
 
     def handle_chaoxing_cookies(self):

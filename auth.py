@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 import time
+from email.utils import formatdate
 from http.cookies import SimpleCookie
 from typing import Optional
 
@@ -55,9 +56,10 @@ def make_session_cookie(user_id: int) -> str:
     expires_at = int(time.time() + config.SESSION_DAYS * 86400)
     token = sign_session(user_id, expires_at)
     max_age = config.SESSION_DAYS * 86400
+    expires_str = formatdate(expires_at, usegmt=True)
     return (
         f"{config.SESSION_COOKIE}={token}; Path=/; Max-Age={max_age}; "
-        "HttpOnly; SameSite=Lax"
+        f"Expires={expires_str}; HttpOnly; SameSite=Lax"
     )
 
 
@@ -132,7 +134,7 @@ def current_user_from_header(cookie_header: str) -> Optional[dict]:
         ).hexdigest()
         if not hmac.compare_digest(signature, expected):
             return None
-        if int(expires_at) < int(time.time()):
+        if int(expires_at) != 0 and int(expires_at) < int(time.time()):
             return None
     except Exception:
         return None

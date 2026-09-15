@@ -78,7 +78,7 @@ def load_rooms() -> list:
 ROOMS = load_rooms()
 
 SESSION_COOKIE = "search_seat_session"
-SESSION_DAYS = get_int_env("SESSION_DAYS", 7)
+SESSION_DAYS = get_int_env("SESSION_DAYS", 3650)
 ADMIN_USERNAME = get_env("ADMIN_USERNAME")
 ADMIN_PASSWORD = get_env("ADMIN_PASSWORD")
 ADMIN_SESSION_COOKIE = "search_seat_admin_session"
