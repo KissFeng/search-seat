@@ -322,6 +322,21 @@ def prepare_office_index_session(session: requests.Session, fid_enc: str) -> Non
 
 
 def fetch_seat_index(session: requests.Session, fid_enc: str = config.FID_ENC) -> dict:
+    try:
+        resp = session.get(
+            config.CHAOXING_SEAT_INDEX_URL,
+            headers=build_office_index_headers(fid_enc),
+            params={"fidEnc": fid_enc},
+            timeout=12,
+            allow_redirects=False,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and data.get("success"):
+                return data
+    except Exception:
+        pass
+
     prepare_office_index_session(session, fid_enc)
     resp = session.get(
         config.CHAOXING_SEAT_INDEX_URL,

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
+import json
 from json import loads
 import sys
 import threading
@@ -13,6 +15,11 @@ from services import seat_service
 
 _CURRENT_RESERVES_CACHE = {}
 _CURRENT_RESERVES_CACHE_LOCK = threading.Lock()
+_REVALIDATING_USER_IDS = set()
+_REVALIDATING_LOCK = threading.Lock()
+
+FRESH_TTL_SECONDS = 20
+STALE_TTL_SECONDS = 300
 CACHE_TTL_SECONDS = 180
 
 
@@ -183,31 +190,108 @@ def public_admin_user(row: dict) -> dict:
     }
 
 
-def fetch_current_reserves_from_cookies(user_id: int, cookies_json: str) -> dict:
-    now = time.time()
+def invalidate_user_reserves_cache(user_id: int) -> None:
     with _CURRENT_RESERVES_CACHE_LOCK:
-        cached = _CURRENT_RESERVES_CACHE.get(user_id)
-        if cached and now - cached["timestamp"] < CACHE_TTL_SECONDS:
-            return cached["data"]
+        _CURRENT_RESERVES_CACHE.pop(user_id, None)
 
+
+def _do_fetch_chaoxing_reserves(user_id: int, cookies_json: str) -> dict:
+    now = time.time()
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
     session = chaoxing.session_from_cookie_json(cookies_json)
     try:
         result = chaoxing.fetch_seat_index(session, config.FID_ENC)
     except Exception as exc:
         mark_chaoxing_error(user_id, str(exc))
-        data = {"reserves": [], "error": str(exc)}
+        data = {"reserves": [], "error": str(exc), "updated_at": now_str, "stale": False}
+        with _CURRENT_RESERVES_CACHE_LOCK:
+            _CURRENT_RESERVES_CACHE[user_id] = {"timestamp": now, "data": data}
         return data
 
     if not result.get("success"):
         mark_chaoxing_error(user_id, str(result))
-        data = {"reserves": [], "error": "学习通预约接口返回失败"}
+        data = {"reserves": [], "error": "学习通预约接口返回失败", "updated_at": now_str, "stale": False}
+        with _CURRENT_RESERVES_CACHE_LOCK:
+            _CURRENT_RESERVES_CACHE[user_id] = {"timestamp": now, "data": data}
         return data
 
     update_chaoxing_cookies(user_id, chaoxing.cookie_jar_to_json(session))
-    data = {"reserves": seat_service.public_current_reserves(result), "error": ""}
+    reserves = seat_service.public_current_reserves(result)
+    data = {"reserves": reserves, "error": "", "updated_at": now_str, "stale": False}
     with _CURRENT_RESERVES_CACHE_LOCK:
         _CURRENT_RESERVES_CACHE[user_id] = {"timestamp": now, "data": data}
+
+    try:
+        _get_db().execute(
+            """
+            UPDATE chaoxing_sessions
+            SET current_reserves_json = %s, reserves_updated_at = NOW()
+            WHERE user_id = %s
+            """,
+            (json.dumps(reserves, ensure_ascii=False), user_id),
+        )
+    except Exception:
+        pass
+
     return data
+
+
+def _async_revalidate_user_reserves(user_id: int, cookies_json: str) -> None:
+    with _REVALIDATING_LOCK:
+        if user_id in _REVALIDATING_USER_IDS:
+            return
+        _REVALIDATING_USER_IDS.add(user_id)
+
+    def _worker():
+        try:
+            _do_fetch_chaoxing_reserves(user_id, cookies_json)
+        finally:
+            with _REVALIDATING_LOCK:
+                _REVALIDATING_USER_IDS.discard(user_id)
+
+    threading.Thread(target=_worker, name=f"reserves-revalidate-{user_id}", daemon=True).start()
+
+
+def fetch_current_reserves_from_cookies(
+    user_id: int,
+    cookies_json: str,
+    force: bool = False,
+    allow_stale: bool = True,
+) -> dict:
+    if force:
+        return _do_fetch_chaoxing_reserves(user_id, cookies_json)
+
+    now = time.time()
+    with _CURRENT_RESERVES_CACHE_LOCK:
+        cached = _CURRENT_RESERVES_CACHE.get(user_id)
+        if cached:
+            age = now - cached["timestamp"]
+            if age < FRESH_TTL_SECONDS:
+                return cached["data"]
+            if allow_stale and age < STALE_TTL_SECONDS:
+                data = dict(cached["data"])
+                data["stale"] = True
+                _async_revalidate_user_reserves(user_id, cookies_json)
+                return data
+
+    if allow_stale:
+        try:
+            row = _get_db().fetch_one(
+                "SELECT current_reserves_json, reserves_updated_at FROM chaoxing_sessions WHERE user_id = %s",
+                (user_id,),
+            )
+            if row and row.get("current_reserves_json"):
+                reserves = json.loads(row["current_reserves_json"])
+                updated_at = str(row.get("reserves_updated_at") or "")
+                data = {"reserves": reserves, "error": "", "updated_at": updated_at, "stale": True}
+                with _CURRENT_RESERVES_CACHE_LOCK:
+                    _CURRENT_RESERVES_CACHE[user_id] = {"timestamp": 0, "data": data}
+                _async_revalidate_user_reserves(user_id, cookies_json)
+                return data
+        except Exception:
+            pass
+
+    return _do_fetch_chaoxing_reserves(user_id, cookies_json)
 
 
 def public_admin_users_with_current_reserves(rows: list) -> list:
@@ -227,25 +311,33 @@ def public_admin_users_with_current_reserves(rows: list) -> list:
     return users
 
 
-def public_admin_user_current_reserves(row: dict) -> dict:
+def public_admin_user_current_reserves(row: dict, force: bool = False) -> dict:
     user_id = int(row.get("id") or row.get("user_id") or 0)
     cookies_json = row.get("cookies_json") or ""
     fetch_fn = _get_app_attr("fetch_current_reserves_from_cookies", fetch_current_reserves_from_cookies)
     if cookies_json:
-        current = fetch_fn(user_id, cookies_json)
+        if force:
+            try:
+                current = fetch_fn(user_id, cookies_json, force=True)
+            except TypeError:
+                current = fetch_fn(user_id, cookies_json)
+        else:
+            current = fetch_fn(user_id, cookies_json)
     else:
         current = {"reserves": [], "error": "未绑定学习通"}
     return {
         "user_id": user_id,
         "current_reserves": current.get("reserves") or [],
         "current_reserves_error": current.get("error") or "",
+        "updated_at": current.get("updated_at") or "",
+        "stale": bool(current.get("stale")),
     }
 
 
-def fetch_admin_current_reserve_rows(limit: int = 500) -> list:
+def fetch_admin_current_reserve_rows(limit: int = 500, force: bool = False) -> list:
     rows = _get_db().fetch_all(
         """
-        SELECT u.id, s.cookies_json
+        SELECT u.id, s.cookies_json, s.current_reserves_json, s.reserves_updated_at
         FROM users u
         LEFT JOIN chaoxing_sessions s ON s.user_id = u.id
         ORDER BY u.id ASC
@@ -254,7 +346,24 @@ def fetch_admin_current_reserve_rows(limit: int = 500) -> list:
         (limit,),
     )
     user_fn = _get_app_attr("public_admin_user_current_reserves", public_admin_user_current_reserves)
-    return [user_fn(row) for row in rows]
+    if len(rows) <= 1:
+        if force:
+            try:
+                return [user_fn(row, force=True) for row in rows]
+            except TypeError:
+                return [user_fn(row) for row in rows]
+        return [user_fn(row) for row in rows]
+
+    def _call_user_fn(r):
+        if force:
+            try:
+                return user_fn(r, force=True)
+            except TypeError:
+                return user_fn(r)
+        return user_fn(r)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(rows))) as executor:
+        return list(executor.map(_call_user_fn, rows))
 
 
 def fetch_admin_user_rows(limit: int = 500) -> list:

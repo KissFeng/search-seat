@@ -159,6 +159,8 @@ def init_db() -> None:
             ensure_column(cursor, "chaoxing_sessions", "cx_user_name", "VARCHAR(128) NULL")
             ensure_column(cursor, "chaoxing_sessions", "curriculum_synced_at", "DATETIME NULL")
             ensure_column(cursor, "chaoxing_sessions", "curriculum_sync_error", "TEXT NULL")
+            ensure_column(cursor, "chaoxing_sessions", "current_reserves_json", "MEDIUMTEXT NULL")
+            ensure_column(cursor, "chaoxing_sessions", "reserves_updated_at", "DATETIME NULL")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_settings (

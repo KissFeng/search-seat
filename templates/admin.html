@@ -322,7 +322,14 @@
                 <th>用户（手机号、登录时间）</th>
                 <th>Cookie</th>
                 <th>推送</th>
-                <th>当前预约</th>
+                <th>
+                  <div style="display: inline-flex; align-items: center; gap: 4px;">
+                    <span>当前预约</span>
+                    <button class="ghost" id="refreshAllAdminReservesBtn" type="button" title="从学习通强制同步全员预约" style="min-height: 22px; padding: 1px 5px; font-size: 11px;" onclick="loadAdminCurrentReserves({ force: true })">
+                      同步全员
+                    </button>
+                  </div>
+                </th>
                 <th>查询</th>
                 <th>蹲座</th>
                 <th>操作</th>
@@ -605,8 +612,13 @@ function renderAdminCurrentReserves(user) {
     return '<div class="admin-reserve-empty">正在加载预约</div>';
   }
   const reserves = user.current_reserves || [];
+  const refreshAction = `<button class="ghost" type="button" title="从学习通同步该用户最新预约" onclick="event.stopPropagation(); refreshAdminUserReserves(${user.id})" style="min-height: 20px; padding: 0 5px; font-size: 11px;">同步</button>`;
+
   if (!reserves.length) {
-    return `<div class="admin-reserve-empty ${user.current_reserves_error ? 'bad' : ''}">${escapeHtml(user.current_reserves_error || '当前没有预约')}</div>`;
+    return `<div class="admin-reserve-empty ${user.current_reserves_error ? 'bad' : ''}">
+      <span>${escapeHtml(user.current_reserves_error || '当前没有预约')}</span>
+      <div style="margin-top: 4px;">${refreshAction}</div>
+    </div>`;
   }
   const cards = reserves.slice(0, 2).map(item => {
     const badgeClass = adminReserveStatusClass(item.status, item.status_label);
@@ -626,7 +638,14 @@ function renderAdminCurrentReserves(user) {
     </div>`;
   }).join('');
   const more = reserves.length > 2 ? `<div class="admin-reserve-more">另有 ${reserves.length - 2} 个预约</div>` : '';
-  return `<div class="admin-reserves">${cards}${more}</div>`;
+  const timeInfo = user.updated_at ? `<span class="muted" style="font-size: 10px;">${escapeHtml(user.updated_at.split(' ')[1] || user.updated_at)}</span>` : '';
+  return `<div class="admin-reserves">
+    ${cards}${more}
+    <div style="display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 4px;">
+      ${timeInfo}
+      ${refreshAction}
+    </div>
+  </div>`;
 }
 
 function renderUsers(data) {
@@ -839,10 +858,36 @@ function updateAdminCurrentReserveCells() {
   });
 }
 
-async function loadAdminCurrentReserves() {
-  const requestId = ++adminCurrentReservesRequest;
+async function refreshAdminUserReserves(userId) {
+  const targetUser = users.find(u => Number(u.id) === Number(userId));
+  if (!targetUser) return;
+  targetUser.current_reserves_loading = true;
+  updateAdminCurrentReserveCells();
   try {
-    const data = await api('/api/admin/users/current-reserves', { method: 'GET', headers: {} });
+    const data = await api(`/api/admin/users/current-reserves?user_id=${userId}&force=1`, { method: 'GET', headers: {} });
+    const current = (data.reserves || [])[0];
+    if (current) {
+      targetUser.current_reserves = current.current_reserves || [];
+      targetUser.current_reserves_error = current.current_reserves_error || '';
+      targetUser.updated_at = current.updated_at || '';
+    }
+  } catch (err) {
+    targetUser.current_reserves_error = err.message || '同步失败';
+  } finally {
+    targetUser.current_reserves_loading = false;
+    updateAdminCurrentReserveCells();
+  }
+}
+
+async function loadAdminCurrentReserves({ force = false } = {}) {
+  const requestId = ++adminCurrentReservesRequest;
+  if (force) {
+    users = users.map(user => ({ ...user, current_reserves_loading: true }));
+    updateAdminCurrentReserveCells();
+  }
+  try {
+    const url = force ? '/api/admin/users/current-reserves?force=1' : '/api/admin/users/current-reserves';
+    const data = await api(url, { method: 'GET', headers: {} });
     if (requestId !== adminCurrentReservesRequest) return;
     const reservesByUser = new Map(
       (data.reserves || []).map(item => [Number(item.user_id), item])
@@ -861,6 +906,7 @@ async function loadAdminCurrentReserves() {
         ...user,
         current_reserves: current.current_reserves || [],
         current_reserves_error: current.current_reserves_error || '',
+        updated_at: current.updated_at || '',
         current_reserves_loading: false
       };
     });

@@ -858,6 +858,10 @@
       .dock-item { min-height: 50px; }
       .json-preview { max-height: 340px; font-size: 11px; }
     }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
@@ -890,7 +894,13 @@
       <section id="querySection" class="app-view" data-app-view>
         <div class="reserve-overview">
           <div class="reserve-overview-head">
-            <h3>我的预约</h3>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <h3 style="margin: 0;">我的预约</h3>
+              <button class="ghost" id="refreshCurrentReservesBtn" type="button" title="从学习通同步最新预约" style="min-height: 28px; padding: 2px 8px; font-size: 12px; gap: 4px;">
+                <svg id="refreshReservesIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                <span>同步</span>
+              </button>
+            </div>
             <div id="currentReservesStatus" class="muted hidden"></div>
           </div>
           <div id="currentReserveCards" class="reserve-grid">
@@ -1413,7 +1423,8 @@ const appViews = Array.from(document.querySelectorAll('[data-app-view]'));
 const allowedTimes = Array.from({ length: 15 }, (_, index) => `${String(index + 8).padStart(2, '0')}:00`);
 const DEFAULT_HISTORY_LIMIT = 3;
 const WATCH_ALERT_POLL_INTERVAL_MS = 5000;
-const CURRENT_RESERVES_REFRESH_MS = 10000;
+const CURRENT_RESERVES_REFRESH_MS = 30000;
+let isRefreshingCurrentReserves = false;
 const CHAT_REFRESH_MS = 3000;
 const ROOM_DISPLAY_ORDER = ['12818', '11226', '12819', '12820'];
 const DEFAULT_ROOMS_FALLBACK = [
@@ -1749,18 +1760,38 @@ function renderCurrentReserves(reserves) {
   }).join('');
 }
 
-async function loadCurrentReserves({ silent = false } = {}) {
+async function loadCurrentReserves({ silent = false, force = false } = {}) {
+  const refreshBtn = document.querySelector('#refreshCurrentReservesBtn');
+  const icon = document.querySelector('#refreshReservesIcon');
+  if (force) {
+    if (isRefreshingCurrentReserves) return;
+    isRefreshingCurrentReserves = true;
+    if (icon) icon.style.animation = 'spin 1s linear infinite';
+    if (refreshBtn) refreshBtn.disabled = true;
+  }
   if (!silent) {
-    currentReservesStatus.textContent = '正在刷新';
+    currentReservesStatus.textContent = force ? '正在从学习通同步...' : '正在刷新...';
+    currentReservesStatus.classList.remove('hidden');
   }
   try {
-    const data = await api('/api/seats/current-reserves', { method: 'GET', headers: {} });
+    const url = force ? '/api/seats/current-reserves?force=1' : '/api/seats/current-reserves';
+    const data = await api(url, { method: 'GET', headers: {} });
     renderCurrentReserves(data.reserves || []);
-    currentReservesStatus.textContent = `每 10 秒刷新 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+    const timeStr = data.updated_at ? (data.updated_at.split(' ')[1] || data.updated_at) : new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const tag = data.stale ? ' (校准中)' : '';
+    currentReservesStatus.textContent = `已同步 · ${timeStr}${tag}`;
+    currentReservesStatus.classList.remove('hidden');
   } catch (error) {
     currentReservesStatus.textContent = error.message;
+    currentReservesStatus.classList.remove('hidden');
     if (!silent) {
       currentReserveCards.innerHTML = '<div class="reserve-empty">暂时无法读取预约</div>';
+    }
+  } finally {
+    if (force) {
+      isRefreshingCurrentReserves = false;
+      if (icon) icon.style.animation = '';
+      if (refreshBtn) refreshBtn.disabled = false;
     }
   }
 }
@@ -1768,7 +1799,11 @@ async function loadCurrentReserves({ silent = false } = {}) {
 function startCurrentReservesRefresh() {
   stopCurrentReservesRefresh();
   loadCurrentReserves();
-  currentReservesTimer = setInterval(() => loadCurrentReserves({ silent: true }), CURRENT_RESERVES_REFRESH_MS);
+  currentReservesTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      loadCurrentReserves({ silent: true });
+    }
+  }, CURRENT_RESERVES_REFRESH_MS);
 }
 
 function scheduleWatchAlertStreamReconnect() {
@@ -2697,6 +2732,17 @@ watchAlertConfirm.addEventListener('click', async () => {
     await ackWatchAlert('confirm');
   } catch (error) {
     setMessage(watchMessage, error.message);
+  }
+});
+
+const refreshReservesBtn = document.querySelector('#refreshCurrentReservesBtn');
+if (refreshReservesBtn) {
+  refreshReservesBtn.addEventListener('click', () => loadCurrentReserves({ force: true }));
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && authPanel && authPanel.classList.contains('hidden')) {
+    loadCurrentReserves({ silent: true });
   }
 });
 

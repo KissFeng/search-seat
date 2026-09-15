@@ -124,6 +124,7 @@ from services.user_service import (
     public_chaoxing_cookie_payload,
     public_admin_user,
     fetch_current_reserves_from_cookies,
+    invalidate_user_reserves_cache,
     public_admin_users_with_current_reserves,
     public_admin_user_current_reserves,
     fetch_admin_current_reserve_rows,
@@ -330,6 +331,9 @@ class AppHandler(BaseHTTPRequestHandler):
         room = get_room((params.get("room_id") or [config.ROOMS[0]["room_id"]])[0])
         day = validate_day((params.get("day") or [datetime.now().strftime("%Y-%m-%d")])[0])
         seat = (params.get("seat") or [""])[0]
+        user = self.current_user()
+        if user:
+            invalidate_user_reserves_cache(user["id"])
         target = chaoxing.build_reserve_url(str(room["room_id"]), str(room["fid_enc"]), day, seat)
         self.send_response(302)
         self.send_header("Location", target)
@@ -340,6 +344,9 @@ class AppHandler(BaseHTTPRequestHandler):
         params = parse_qs(query)
         room = get_room((params.get("room_id") or [config.ROOMS[0]["room_id"]])[0])
         seat = (params.get("seat") or [""])[0]
+        user = self.current_user()
+        if user:
+            invalidate_user_reserves_cache(user["id"])
         target = checkin_url(str(room["room_id"]), seat)
         self.send_response(302)
         self.send_header("Location", target)
@@ -463,7 +470,27 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_admin_users_current_reserves(self):
         if not self.require_admin():
             return
-        reserves = fetch_admin_current_reserve_rows()
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        force = (params.get("force") or ["0"])[0] in ("1", "true", "True")
+        user_id_param = (params.get("user_id") or [""])[0]
+        if user_id_param.isdigit():
+            user_id = int(user_id_param)
+            cx = get_chaoxing_session(user_id)
+            if not cx or not cx.get("cookies_json"):
+                self.send_json(200, {"reserves": [{"user_id": user_id, "current_reserves": [], "current_reserves_error": "未绑定学习通", "updated_at": "", "stale": False}]})
+                return
+            current = fetch_current_reserves_from_cookies(user_id, cx["cookies_json"], force=True)
+            self.send_json(200, {"reserves": [{
+                "user_id": user_id,
+                "current_reserves": current.get("reserves") or [],
+                "current_reserves_error": current.get("error") or "",
+                "updated_at": current.get("updated_at") or "",
+                "stale": bool(current.get("stale")),
+            }]})
+            return
+
+        reserves = fetch_admin_current_reserve_rows(force=force)
         self.send_json(200, {"reserves": reserves})
 
     def handle_admin_app_versions(self):
@@ -781,20 +808,21 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(409, {"error": "请先登录学习通"})
             return
 
-        session = chaoxing.session_from_cookie_json(cx["cookies_json"])
-        try:
-            result = chaoxing.fetch_seat_index(session, config.FID_ENC)
-        except Exception as exc:
-            mark_chaoxing_error(user["id"], str(exc))
-            raise
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        force = (params.get("force") or ["0"])[0] in ("1", "true", "True")
 
-        if not result.get("success"):
-            mark_chaoxing_error(user["id"], str(result))
-            self.send_json(502, {"error": "学习通预约接口返回失败", "raw": result})
+        res = fetch_current_reserves_from_cookies(user["id"], cx["cookies_json"], force=force)
+        if res.get("error") and not res.get("reserves"):
+            self.send_json(502, {"error": res["error"], "reserves": []})
             return
 
-        update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
-        self.send_json(200, {"ok": True, "reserves": public_current_reserves(result)})
+        self.send_json(200, {
+            "ok": True,
+            "reserves": res.get("reserves") or [],
+            "updated_at": res.get("updated_at") or "",
+            "stale": bool(res.get("stale")),
+        })
 
     def handle_reserve_history(self):
         user = self.require_user()
