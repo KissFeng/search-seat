@@ -273,6 +273,7 @@ def build_seat_response(room: dict, day: str, start_time: str, end_time: str, re
                 "seats": pair,
                 "url": local_reserve_path(room_id, day, "-".join(pair)),
             }
+            for pair in pairs
         ],
         "summary": {
             "total": len(all_seats),
