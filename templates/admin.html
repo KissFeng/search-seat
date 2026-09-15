@@ -1,0 +1,1161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>座位雷达管理后台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef3ef;
+      --panel: #ffffff;
+      --ink: #15211c;
+      --muted: #65746d;
+      --line: #d6e0da;
+      --soft: #f6faf7;
+      --green: #1f5b4e;
+      --green-dark: #143c35;
+      --amber: #b77822;
+      --red: #b84a38;
+      --blue: #315f86;
+      --mono: "SFMono-Regular", "Cascadia Mono", "Menlo", monospace;
+      --body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-family: var(--body);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(90deg, rgba(31, 91, 78, .07) 1px, transparent 1px) 0 0 / 42px 42px,
+        linear-gradient(180deg, rgba(31, 91, 78, .06) 1px, transparent 1px) 0 0 / 42px 42px,
+        var(--bg);
+      color: var(--ink);
+    }
+    header {
+      min-height: 64px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: rgba(255, 255, 255, .9);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      backdrop-filter: blur(14px);
+    }
+    h1 { margin: 0; color: var(--green-dark); font-size: 19px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; color: var(--green-dark); font-size: 16px; }
+    main { width: min(1380px, calc(100vw - 28px)); margin: 0 auto; padding: 20px 0 34px; }
+    section {
+      background: rgba(255, 255, 255, .94);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 14px;
+      box-shadow: 0 12px 28px rgba(21, 33, 28, .05);
+    }
+    input, textarea {
+      width: 100%;
+      min-height: 42px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 15px;
+      background: #fbfdfb;
+      color: var(--ink);
+      outline: none;
+    }
+    textarea { min-height: 84px; resize: vertical; line-height: 1.55; font-family: var(--body); }
+    input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 91, 78, .14); }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: 13px; font-weight: 700; }
+    button {
+      border: 0;
+      border-radius: 6px;
+      min-height: 38px;
+      padding: 9px 13px;
+      background: var(--green);
+      color: #fff;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button:hover { background: var(--green-dark); }
+    button.secondary { background: #334944; }
+    button.ghost { background: #fff; color: var(--green-dark); border: 1px solid var(--line); }
+    button.danger { background: var(--red); }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .hidden { display: none !important; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .top-user { justify-content: flex-end; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .bad { color: var(--red); }
+    .ok { color: #12764f; }
+    .message { min-height: 20px; margin-top: 10px; font-size: 13px; font-weight: 700; }
+    .auth {
+      width: min(460px, 100%);
+      margin: 52px auto;
+      border-top: 5px solid var(--green);
+    }
+    .auth form { display: grid; gap: 12px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .admin-menu {
+      display: inline-flex;
+      gap: 6px;
+      padding: 5px;
+      margin: 0 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .86);
+    }
+    .admin-menu-item {
+      min-height: 36px;
+      background: transparent;
+      color: var(--green-dark);
+      border: 0;
+      box-shadow: none;
+    }
+    .admin-menu-item:hover { background: #f1f6f2; color: var(--green-dark); }
+    .admin-menu-item.active { background: var(--green); color: #fff; }
+    .admin-view.hidden { display: none !important; }
+    .app-version-form { display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(120px, .7fr)) auto; gap: 12px; align-items: end; }
+    .app-version-form .wide { grid-column: 1 / -1; }
+    .check-row { display: flex; align-items: center; gap: 8px; min-height: 42px; }
+    .check-row input { width: 16px; min-height: 0; height: 16px; padding: 0; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .stat b { display: block; margin-top: 5px; color: var(--ink); font: 900 24px/1 var(--mono); }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; min-width: 1160px; }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+    th { background: var(--soft); color: #4e6058; font-size: 12px; white-space: nowrap; }
+    tr:hover td { background: #fbfdfb; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: #edf2ef;
+      color: #53645c;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .pill.ok { background: #dff4ea; color: #0a5a3b; }
+    .pill.warn { background: #fff3d6; color: #7b4d0a; }
+    .pill.bad { background: #f8e3df; color: var(--red); }
+    .admin-reserves { display: grid; gap: 6px; min-width: 220px; max-width: 280px; }
+    .admin-reserve-card {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px;
+      border: 1px solid rgba(31, 91, 78, .18);
+      border-radius: 8px;
+      background: #fbfdfb;
+    }
+    .admin-reserve-seat {
+      display: grid;
+      place-items: center;
+      height: 34px;
+      border-radius: 7px;
+      background: #dff4ea;
+      color: #0a5a3b;
+      font: 900 14px/1 var(--mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-main { min-width: 0; }
+    .admin-reserve-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 850;
+    }
+    .admin-reserve-room {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-meta {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .admin-reserve-badge {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: #e6f0ff;
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .admin-reserve-badge.using { background: #dff4ea; color: #0a5a3b; }
+    .admin-reserve-badge.pending { background: #fff3d6; color: #7b4d0a; }
+    .admin-reserve-badge.violation { background: #f8e3df; color: var(--red); }
+    .admin-reserve-empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      background: #fbfdfb;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .admin-reserve-more { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .actions { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+    .actions button { min-height: 32px; padding: 6px 9px; font-size: 12px; }
+    .check-cell { width: 38px; text-align: center; }
+    .chat-content { max-width: 460px; white-space: pre-wrap; word-break: break-word; }
+    .range-actions { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)) auto; gap: 8px; align-items: end; }
+    .push-form { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(220px, 1.2fr) minmax(180px, .9fr) auto; gap: 8px; align-items: end; margin-bottom: 12px; }
+    .pager { display: flex; justify-content: flex-end; gap: 8px; align-items: center; margin-top: 10px; }
+    .pager button { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .field { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+    .field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .field b { display: block; color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
+    .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (max-width: 780px) {
+      header { padding: 10px 14px; align-items: flex-start; }
+      main { width: calc(100vw - 16px); padding-top: 12px; }
+      section { padding: 14px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .toolbar .row { justify-content: flex-start; }
+      .admin-menu { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .admin-menu-item { width: 100%; }
+      .range-actions, .push-form { grid-template-columns: 1fr; }
+      .stats, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .top-user { justify-content: flex-start; }
+      .admin-menu, .app-version-form { display: grid; grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>座位雷达管理后台</h1>
+    <div id="topUser" class="row top-user hidden">
+      <span class="muted" id="adminName"></span>
+      <button class="ghost" id="logoutBtn" type="button">退出</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="loginPanel" class="auth">
+      <h2>管理账号登录</h2>
+      <form id="loginForm">
+        <label>账号
+          <input name="username" autocomplete="username" required>
+        </label>
+        <label>密码
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">登录</button>
+      </form>
+      <div id="loginMessage" class="message"></div>
+    </section>
+
+    <div id="adminPanel" class="hidden">
+      <nav class="admin-menu" aria-label="管理菜单">
+        <button class="admin-menu-item active" type="button" data-admin-target="usersAdminView">用户管理</button>
+        <button class="admin-menu-item" type="button" data-admin-target="chatAdminView">消息聊天室</button>
+        <button class="admin-menu-item" type="button" data-admin-target="appUpdateAdminView">App 更新</button>
+      </nav>
+
+      <div id="usersAdminView" class="admin-view" data-admin-view>
+      <section>
+        <div class="toolbar">
+          <div>
+            <h2>用户一览</h2>
+            <div class="muted">用户列表会优先展示；当前预约会随后实时读取学习通补充。</div>
+          </div>
+          <div class="row">
+            <button class="ghost" id="refreshBtn" type="button">刷新</button>
+            <button id="syncMissingBtn" type="button">补全缺失姓名</button>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat">用户 <b id="statUsers">0</b></div>
+          <div class="stat">查询记录 <b id="statQueries">0</b></div>
+          <div class="stat">蹲座任务 <b id="statWatch">0</b></div>
+        </div>
+        <form id="adminPushForm" class="push-form">
+          <label>推送标题
+            <input name="title" maxlength="50" value="座位雷达">
+          </label>
+          <label>推送内容
+            <input name="body" maxlength="256" placeholder="输入要发送给选中用户的消息" required>
+          </label>
+          <label>打开链接
+            <input name="target_url" maxlength="1024" placeholder="/ 或 /reserve?...">
+          </label>
+          <button type="submit">发送给选中用户</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="check-cell"><input id="userSelectAllAdmin" type="checkbox"></th>
+                <th>ID</th>
+                <th>姓名</th>
+                <th>用户（手机号、登录时间）</th>
+                <th>Cookie</th>
+                <th>推送</th>
+                <th>当前预约</th>
+                <th>查询</th>
+                <th>蹲座</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userRows"></tbody>
+          </table>
+        </div>
+        <div id="usersMessage" class="message"></div>
+      </section>
+
+      <section id="detailPanel" class="hidden">
+        <div class="toolbar">
+          <div>
+            <h2 id="detailTitle">用户详情</h2>
+            <div id="detailSub" class="muted"></div>
+          </div>
+          <div class="row">
+            <button class="ghost" id="detailSyncBtn" type="button">同步姓名</button>
+            <button class="ghost" id="closeDetailBtn" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="detail-grid" id="detailFields"></div>
+        <div class="split">
+          <div>
+            <h2>最近查询</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>日期</th>
+                    <th>时段</th>
+                    <th>房间</th>
+                    <th>可预约</th>
+                    <th>已占用</th>
+                    <th>连排</th>
+                  </tr>
+                </thead>
+                <tbody id="queryRows"></tbody>
+              </table>
+            </div>
+            <div class="pager" id="queryPager"></div>
+          </div>
+          <div>
+            <h2>最近蹲座</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>创建时间</th>
+                    <th>日期</th>
+                    <th>时段</th>
+                    <th>房间</th>
+                    <th>状态</th>
+                    <th>命中座位</th>
+                  </tr>
+                </thead>
+                <tbody id="watchRowsAdmin"></tbody>
+              </table>
+            </div>
+            <div class="pager" id="watchPager"></div>
+          </div>
+        </div>
+      </section>
+      </div>
+
+      <div id="chatAdminView" class="admin-view hidden" data-admin-view>
+        <section>
+          <div class="toolbar">
+            <div>
+              <h2>消息聊天室</h2>
+              <div class="muted">查看最近 200 条文字消息，可单条、批量或按时间段删除。</div>
+            </div>
+            <div class="row">
+              <button class="ghost" id="refreshChatAdminBtn" type="button">刷新消息</button>
+              <button class="danger" id="deleteSelectedChatBtn" type="button">删除选中</button>
+            </div>
+          </div>
+          <div class="range-actions">
+            <label>开始时间
+              <input id="chatDeleteStartAt" type="datetime-local">
+            </label>
+            <label>结束时间
+              <input id="chatDeleteEndAt" type="datetime-local">
+            </label>
+            <button class="danger" id="deleteChatRangeBtn" type="button">删除时间段</button>
+          </div>
+          <div class="table-wrap" style="margin-top: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th class="check-cell"><input id="chatSelectAllAdmin" type="checkbox"></th>
+                  <th>ID</th>
+                  <th>时间</th>
+                  <th>姓名</th>
+                  <th>用户</th>
+                  <th>内容</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="chatRowsAdmin"></tbody>
+            </table>
+          </div>
+          <div id="chatAdminMessage" class="message"></div>
+        </section>
+      </div>
+
+      <div id="appUpdateAdminView" class="admin-view hidden" data-admin-view>
+        <section>
+          <div class="toolbar">
+            <div>
+              <h2>Android App 更新</h2>
+              <div class="muted">上传 APK 后，Android 客户端进入应用时会检查版本并提示安装。</div>
+            </div>
+            <button class="ghost" id="refreshAppVersionsBtn" type="button">刷新版本</button>
+          </div>
+          <form id="appVersionForm" class="app-version-form" enctype="multipart/form-data">
+            <label>APK
+              <input name="apk" type="file" accept=".apk,application/vnd.android.package-archive" required>
+            </label>
+            <label>版本号
+              <input name="version_code" type="number" min="1" step="1" required>
+            </label>
+            <label>版本名
+              <input name="version_name" placeholder="1.6" required>
+            </label>
+            <label class="check-row">
+              <input name="force_update" type="checkbox" value="1">
+              强制更新
+            </label>
+            <label class="wide">更新说明
+              <textarea name="release_notes" rows="3" placeholder="本次更新内容"></textarea>
+            </label>
+            <button type="submit">上传发布</button>
+          </form>
+          <div class="table-wrap" style="margin-top: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>版本号</th>
+                  <th>版本名</th>
+                  <th>大小</th>
+                  <th>SHA-256</th>
+                  <th>强制</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody id="appVersionRows"></tbody>
+            </table>
+          </div>
+          <div id="appUpdateMessage" class="message"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+<script>
+const loginPanel = document.querySelector('#loginPanel');
+const adminPanel = document.querySelector('#adminPanel');
+const topUser = document.querySelector('#topUser');
+const adminName = document.querySelector('#adminName');
+const adminMenuItems = Array.from(document.querySelectorAll('[data-admin-target]'));
+const adminViews = Array.from(document.querySelectorAll('[data-admin-view]'));
+const loginForm = document.querySelector('#loginForm');
+const loginMessage = document.querySelector('#loginMessage');
+const usersMessage = document.querySelector('#usersMessage');
+const userRows = document.querySelector('#userRows');
+const userSelectAllAdmin = document.querySelector('#userSelectAllAdmin');
+const adminPushForm = document.querySelector('#adminPushForm');
+const detailPanel = document.querySelector('#detailPanel');
+const detailTitle = document.querySelector('#detailTitle');
+const detailSub = document.querySelector('#detailSub');
+const detailFields = document.querySelector('#detailFields');
+const queryRows = document.querySelector('#queryRows');
+const watchRowsAdmin = document.querySelector('#watchRowsAdmin');
+const queryPager = document.querySelector('#queryPager');
+const watchPager = document.querySelector('#watchPager');
+const detailSyncBtn = document.querySelector('#detailSyncBtn');
+const appVersionForm = document.querySelector('#appVersionForm');
+const appVersionRows = document.querySelector('#appVersionRows');
+const appUpdateMessage = document.querySelector('#appUpdateMessage');
+const chatRowsAdmin = document.querySelector('#chatRowsAdmin');
+const chatAdminMessage = document.querySelector('#chatAdminMessage');
+const chatSelectAllAdmin = document.querySelector('#chatSelectAllAdmin');
+const chatDeleteStartAt = document.querySelector('#chatDeleteStartAt');
+const chatDeleteEndAt = document.querySelector('#chatDeleteEndAt');
+let selectedUserId = null;
+let users = [];
+let appVersions = [];
+let adminChatMessages = [];
+let selectedQueryPage = 1;
+let selectedWatchPage = 1;
+let adminCurrentReservesRequest = 0;
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function setMessage(node, text, ok = false) {
+  node.textContent = text || '';
+  node.className = `message ${ok ? 'ok' : text ? 'bad' : ''}`;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const plain = text.trim();
+      if (res.status >= 500) {
+        const serverText = plain && !plain.startsWith('<') ? `：${plain.slice(0, 120)}` : '';
+        throw new Error(`服务器内部错误（${res.status}）${serverText}。请查看后端日志；如果刚更新后台，请重启服务让数据库迁移生效。`);
+      }
+      const htmlHint = plain.startsWith('<')
+        ? '接口返回了页面而不是 JSON，请刷新后台并重新登录；如果刚更新代码，请重启服务。'
+        : `接口返回格式不正确：${plain.slice(0, 120) || '空响应'}`;
+      throw new Error(htmlHint);
+    }
+  }
+  if (!res.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+
+function showLogin() {
+  loginPanel.classList.remove('hidden');
+  adminPanel.classList.add('hidden');
+  topUser.classList.add('hidden');
+}
+
+function showAdmin(admin) {
+  loginPanel.classList.add('hidden');
+  adminPanel.classList.remove('hidden');
+  topUser.classList.remove('hidden');
+  adminName.textContent = admin.username;
+  switchAdminView('usersAdminView');
+}
+
+function switchAdminView(targetId) {
+  adminMenuItems.forEach(item => {
+    item.classList.toggle('active', item.dataset.adminTarget === targetId);
+  });
+  adminViews.forEach(view => {
+    view.classList.toggle('hidden', view.id !== targetId);
+  });
+  if (targetId === 'appUpdateAdminView') {
+    loadAppVersions().catch(error => setMessage(appUpdateMessage, error.message));
+  }
+  if (targetId === 'chatAdminView') {
+    loadAdminChatMessages().catch(error => setMessage(chatAdminMessage, error.message));
+  }
+}
+
+function renderSummary(summary) {
+  document.querySelector('#statUsers').textContent = summary.users || 0;
+  document.querySelector('#statQueries').textContent = summary.queries || 0;
+  document.querySelector('#statWatch').textContent = summary.watch_tasks || 0;
+}
+
+function adminReserveStatusClass(status, label = '') {
+  if (label === '违约') return 'violation';
+  if (status === 1) return 'using';
+  if (status === 0) return 'pending';
+  return '';
+}
+
+function renderAdminCurrentReserves(user) {
+  if (user.current_reserves_loading) {
+    return '<div class="admin-reserve-empty">正在加载预约</div>';
+  }
+  const reserves = user.current_reserves || [];
+  if (!reserves.length) {
+    return `<div class="admin-reserve-empty ${user.current_reserves_error ? 'bad' : ''}">${escapeHtml(user.current_reserves_error || '当前没有预约')}</div>`;
+  }
+  const cards = reserves.slice(0, 2).map(item => {
+    const badgeClass = adminReserveStatusClass(item.status, item.status_label);
+    const detail = [
+      item.day,
+      item.time_range
+    ].filter(Boolean).join(' · ');
+    return `<div class="admin-reserve-card">
+      <span class="admin-reserve-seat">${escapeHtml(item.seat_num || '-')}</span>
+      <span class="admin-reserve-main">
+        <span class="admin-reserve-title">
+          <span class="admin-reserve-room">${escapeHtml(item.room_name || item.room_id || '预约座位')}</span>
+          <span class="admin-reserve-badge ${badgeClass}">${escapeHtml(item.status_label || '-')}</span>
+        </span>
+        <span class="admin-reserve-meta">${escapeHtml(detail || '-')}</span>
+      </span>
+    </div>`;
+  }).join('');
+  const more = reserves.length > 2 ? `<div class="admin-reserve-more">另有 ${reserves.length - 2} 个预约</div>` : '';
+  return `<div class="admin-reserves">${cards}${more}</div>`;
+}
+
+function renderUsers(data) {
+  users = (data.users || []).map(user => ({
+    current_reserves: [],
+    current_reserves_error: '',
+    current_reserves_loading: true,
+    ...user
+  }));
+  userSelectAllAdmin.checked = false;
+  renderSummary(data.summary || {});
+  userRows.innerHTML = users.map(user => `<tr>
+    <td class="check-cell"><input class="user-check-admin" type="checkbox" value="${user.id}" ${Number(user.push_device_count || 0) > 0 ? '' : 'disabled'}></td>
+    <td>${user.id}</td>
+    <td>
+      <b>${escapeHtml(user.cx_user_name || '-')}</b>
+      ${user.disabled ? '<div><span class="pill bad">已禁用</span></div>' : ''}
+    </td>
+    <td>
+      <b>${escapeHtml(user.username)}</b>
+      <div class="muted">登录：${escapeHtml(user.last_login_at || '-')}</div>
+    </td>
+    <td>
+      ${cookieStatus(user)}
+      <div class="actions"><button class="ghost" type="button" ${user.cx_account ? '' : 'disabled'} onclick="copyUserCookie(${user.id})">复制</button></div>
+    </td>
+    <td>${pushStatus(user)}</td>
+    <td data-current-reserves-user="${user.id}">${renderAdminCurrentReserves(user)}</td>
+    <td>${user.query_count}<div class="muted">${escapeHtml(user.last_query_at || '-')}</div></td>
+    <td>${watchStatus(user)}</td>
+    <td><span class="actions">
+      <button class="ghost" type="button" onclick="viewUser(${user.id})">查看</button>
+      <button type="button" onclick="syncUser(${user.id})">同步</button>
+      <button id="toggleUser${user.id}" class="${user.disabled ? 'ghost' : 'danger'}" type="button" onclick="toggleUserDisabled(${user.id}, ${user.disabled ? 'false' : 'true'})">${user.disabled ? '启用' : '禁用'}</button>
+    </span></td>
+  </tr>`).join('') || '<tr><td colspan="10">暂无用户</td></tr>';
+}
+
+function selectedAdminUserIds() {
+  return Array.from(new Set(
+    Array.from(document.querySelectorAll('.user-check-admin:checked')).map(item => Number(item.value))
+  ));
+}
+
+async function sendAdminPushMessage(event) {
+  event.preventDefault();
+  const userIds = selectedAdminUserIds();
+  if (!userIds.length) {
+    setMessage(usersMessage, '请选择至少一个已绑定推送设备的用户');
+    return;
+  }
+  const payload = Object.fromEntries(new FormData(adminPushForm).entries());
+  payload.user_ids = userIds;
+  const submit = adminPushForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  setMessage(usersMessage, `正在向 ${userIds.length} 个用户发送推送...`);
+  try {
+    const data = await api('/api/admin/push/send', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    const result = data.result || {};
+    if (result.skipped) {
+      setMessage(usersMessage, '个推服务端配置未启用，消息未发送');
+    } else if (Number(result.failed || 0) > 0) {
+      setMessage(usersMessage, `已发送 ${result.sent || 0} 个设备，失败 ${result.failed || 0} 个`);
+    } else {
+      setMessage(usersMessage, `已发送 ${result.sent || 0} 个设备，覆盖 ${result.reachable_users || 0} 个用户`, true);
+      adminPushForm.body.value = '';
+      adminPushForm.target_url.value = '';
+    }
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function renderAdminChatMessages() {
+  chatSelectAllAdmin.checked = false;
+  chatRowsAdmin.innerHTML = adminChatMessages.slice().reverse().map(message => `<tr>
+    <td class="check-cell"><input class="chat-check-admin" type="checkbox" value="${message.id}"></td>
+    <td>${message.id}</td>
+    <td>${escapeHtml(message.created_at)}</td>
+    <td><b>${escapeHtml(message.author_name)}</b></td>
+    <td>${escapeHtml(message.user_id)}</td>
+    <td class="chat-content">${escapeHtml(message.content)}</td>
+    <td><span class="actions">
+      <button class="danger" type="button" onclick="deleteAdminChatMessage(${message.id})">删除</button>
+    </span></td>
+  </tr>`).join('') || '<tr><td colspan="7">暂无聊天消息</td></tr>';
+}
+
+function selectedAdminChatIds() {
+  return Array.from(new Set(
+    Array.from(document.querySelectorAll('.chat-check-admin:checked')).map(item => Number(item.value))
+  ));
+}
+
+async function deleteAdminChatMessages(payload, confirmText) {
+  if (!window.confirm(confirmText)) return;
+  setMessage(chatAdminMessage, '正在删除...');
+  try {
+    const data = await api('/api/admin/chat/messages/delete', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    adminChatMessages = data.messages || [];
+    renderAdminChatMessages();
+    setMessage(chatAdminMessage, `已删除 ${data.deleted || 0} 条消息`, true);
+  } catch (error) {
+    setMessage(chatAdminMessage, error.message);
+  }
+}
+
+function deleteAdminChatMessage(id) {
+  deleteAdminChatMessages({ ids: [id] }, '确定删除这条聊天消息吗？');
+}
+
+function deleteSelectedAdminChatMessages() {
+  const ids = selectedAdminChatIds();
+  if (!ids.length) {
+    setMessage(chatAdminMessage, '请选择要删除的消息');
+    return;
+  }
+  deleteAdminChatMessages({ ids }, `确定删除选中的 ${ids.length} 条消息吗？`);
+}
+
+function deleteAdminChatRange() {
+  const startAt = chatDeleteStartAt.value;
+  const endAt = chatDeleteEndAt.value;
+  if (!startAt || !endAt) {
+    setMessage(chatAdminMessage, '请选择开始时间和结束时间');
+    return;
+  }
+  deleteAdminChatMessages(
+    { start_at: startAt, end_at: endAt },
+    `确定删除 ${startAt.replace('T', ' ')} 到 ${endAt.replace('T', ' ')} 的消息吗？`
+  );
+}
+
+function cookieStatus(user) {
+  if (!user.cx_account) return '<span class="pill warn">未绑定</span>';
+  if (user.session_valid) return '<span class="pill ok">正常</span>';
+  return '<span class="pill bad">异常</span>';
+}
+
+function pushStatus(user) {
+  const count = Number(user.push_device_count || 0);
+  if (count > 0) return `<span class="pill ok">已绑定 ${count}</span>`;
+  return '<span class="pill warn">未绑定</span>';
+}
+
+function watchStatus(user) {
+  const running = Number(user.running_watch_count || 0);
+  const status = running > 0
+    ? `<span class="pill warn">蹲座中 ${running}</span>`
+    : '<span class="pill">无进行中</span>';
+  return `${user.watch_count}${status}<div class="muted">${escapeHtml(user.last_watch_at || '-')}</div>`;
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+function renderAppVersions() {
+  appVersionRows.innerHTML = appVersions.map(version => `<tr>
+    <td>${escapeHtml(version.version_code)}</td>
+    <td><b>${escapeHtml(version.version_name)}</b></td>
+    <td>${escapeHtml(formatBytes(version.apk_size))}</td>
+    <td><code>${escapeHtml(String(version.apk_sha256 || '').slice(0, 12))}</code></td>
+    <td>${version.force_update ? '<span class="pill warn">强制</span>' : '<span class="pill">可选</span>'}</td>
+    <td>${escapeHtml(version.created_at || '-')}</td>
+  </tr>`).join('') || '<tr><td colspan="6">暂无版本</td></tr>';
+}
+
+async function loadAppVersions() {
+  const data = await api('/api/admin/app-versions', { method: 'GET', headers: {} });
+  appVersions = data.versions || [];
+  renderAppVersions();
+}
+
+async function loadMe() {
+  const data = await api('/api/admin/me', { method: 'GET', headers: {} });
+  if (!data.admin) {
+    showLogin();
+    return;
+  }
+  showAdmin(data.admin);
+  await loadUsers();
+  await loadAppVersions();
+  await loadAdminChatMessages();
+}
+
+async function loadUsers() {
+  const data = await api('/api/admin/users', { method: 'GET', headers: {} });
+  renderUsers(data);
+  loadAdminCurrentReserves();
+}
+
+function updateAdminCurrentReserveCells() {
+  users.forEach(user => {
+    const cell = document.querySelector(`[data-current-reserves-user="${user.id}"]`);
+    if (cell) {
+      cell.innerHTML = renderAdminCurrentReserves(user);
+    }
+  });
+}
+
+async function loadAdminCurrentReserves() {
+  const requestId = ++adminCurrentReservesRequest;
+  try {
+    const data = await api('/api/admin/users/current-reserves', { method: 'GET', headers: {} });
+    if (requestId !== adminCurrentReservesRequest) return;
+    const reservesByUser = new Map(
+      (data.reserves || []).map(item => [Number(item.user_id), item])
+    );
+    users = users.map(user => {
+      const current = reservesByUser.get(Number(user.id));
+      if (!current) {
+        return {
+          ...user,
+          current_reserves: [],
+          current_reserves_error: '未读取到预约',
+          current_reserves_loading: false
+        };
+      }
+      return {
+        ...user,
+        current_reserves: current.current_reserves || [],
+        current_reserves_error: current.current_reserves_error || '',
+        current_reserves_loading: false
+      };
+    });
+    updateAdminCurrentReserveCells();
+  } catch (error) {
+    if (requestId !== adminCurrentReservesRequest) return;
+    users = users.map(user => ({
+      ...user,
+      current_reserves: [],
+      current_reserves_error: error.message || '预约读取失败',
+      current_reserves_loading: false
+    }));
+    updateAdminCurrentReserveCells();
+  }
+}
+
+async function loadAdminChatMessages() {
+  const data = await api('/api/admin/chat/messages', { method: 'GET', headers: {} });
+  adminChatMessages = data.messages || [];
+  renderAdminChatMessages();
+}
+
+async function refreshAdminDataForUser(id) {
+  await loadUsers();
+  if (selectedUserId === id) {
+    await viewUser(id, selectedQueryPage, selectedWatchPage);
+  }
+}
+
+function renderDetailFields(user) {
+  const fields = [
+    ['用户 ID', user.id],
+    ['用户（手机号）', user.username],
+    ['状态', user.disabled ? '已禁用' : '正常'],
+    ['学习通账号', user.cx_account || '-'],
+    ['学习通姓名', user.cx_user_name || '-'],
+    ['推送设备', user.push_device_count || 0],
+    ['查询次数', user.query_count],
+    ['蹲座次数', user.watch_count]
+  ];
+  detailFields.innerHTML = fields.map(([label, value]) =>
+    `<div class="field"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`
+  ).join('');
+}
+
+function renderPager(target, pagination, kind) {
+  const page = pagination.page || 1;
+  const totalPages = pagination.total_pages || 1;
+  const total = pagination.total || 0;
+  target.innerHTML = `
+    <span class="muted">第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+    <button class="ghost" type="button" ${page <= 1 ? 'disabled' : ''} onclick="changeDetailPage('${kind}', ${page - 1})">上一页</button>
+    <button class="ghost" type="button" ${page >= totalPages ? 'disabled' : ''} onclick="changeDetailPage('${kind}', ${page + 1})">下一页</button>
+  `;
+}
+
+function renderQueryRows(rows, pagination) {
+  queryRows.innerHTML = rows.map(row => `<tr>
+    <td>${escapeHtml(row.created_at)}</td>
+    <td>${escapeHtml(row.day)}</td>
+    <td>${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+    <td>${escapeHtml(row.room_name || row.room_id)}</td>
+    <td>${row.available_count}</td>
+    <td>${row.occupied_count}</td>
+    <td>${row.pair_count}</td>
+  </tr>`).join('') || '<tr><td colspan="7">暂无查询记录</td></tr>';
+  renderPager(queryPager, pagination || {}, 'query');
+}
+
+function renderWatchRows(rows, pagination) {
+  watchRowsAdmin.innerHTML = rows.map(row => {
+    const matched = row.matched_seats || [];
+    const matchedText = matched.length > 12 ? `${matched.slice(0, 12).join(', ')} 等 ${matched.length} 个` : matched.join(', ');
+    const statusClass = row.status === 'matched' ? 'ok' : row.status === 'running' ? 'warn' : '';
+    return `<tr>
+      <td>${escapeHtml(row.created_at)}</td>
+      <td>${escapeHtml(row.day)}</td>
+      <td>${escapeHtml(row.start_time)}-${escapeHtml(row.end_time)}</td>
+      <td>${escapeHtml(row.room_name || row.room_id)}</td>
+      <td><span class="pill ${statusClass}">${escapeHtml(row.status_label || row.status)}</span></td>
+      <td>${escapeHtml(matchedText || '-')}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6">暂无蹲座记录</td></tr>';
+  renderPager(watchPager, pagination || {}, 'watch');
+}
+
+async function viewUser(id, queryPage = 1, watchPage = 1) {
+  selectedUserId = id;
+  selectedQueryPage = queryPage;
+  selectedWatchPage = watchPage;
+  setMessage(usersMessage, '');
+  const data = await api(`/api/admin/users/${id}?query_page=${queryPage}&watch_page=${watchPage}`, { method: 'GET', headers: {} });
+  detailTitle.textContent = `用户详情：${data.user.cx_user_name || data.user.username}`;
+  detailSub.textContent = `查询 ${data.user.query_count} 次，蹲座 ${data.user.watch_count} 次`;
+  renderDetailFields(data.user);
+  renderQueryRows(data.query_history || [], data.query_pagination);
+  renderWatchRows(data.watch_history || [], data.watch_pagination);
+  detailPanel.classList.remove('hidden');
+  detailPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function changeDetailPage(kind, page) {
+  if (!selectedUserId) return;
+  const queryPage = kind === 'query' ? page : selectedQueryPage;
+  const watchPage = kind === 'watch' ? page : selectedWatchPage;
+  viewUser(selectedUserId, queryPage, watchPage);
+}
+
+async function syncUser(id) {
+  setMessage(usersMessage, '正在同步姓名...');
+  const data = await api(`/api/admin/users/${id}/sync-profile`, { method: 'POST', body: '{}' });
+  await loadUsers();
+  if (selectedUserId === id) await viewUser(id, selectedQueryPage, selectedWatchPage);
+  if (data.sync && data.sync.ok) {
+    setMessage(usersMessage, `已同步：${data.sync.user_name}`, true);
+  } else {
+    setMessage(usersMessage, data.sync && data.sync.error ? data.sync.error : '同步失败');
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+async function copyUserCookie(id) {
+  setMessage(usersMessage, '正在读取 Cookie...');
+  try {
+    const data = await api(`/api/admin/users/${id}/cookie`, { method: 'GET', headers: {} });
+    if (!data.cookie) throw new Error('这个用户没有可复制的 Cookie');
+    await copyText(data.cookie);
+    setMessage(usersMessage, data.session_valid ? 'Cookie 已复制' : 'Cookie 已复制，但状态异常', true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+}
+
+async function toggleUserDisabled(id, disabled) {
+  const action = disabled ? '禁用' : '启用';
+  if (!window.confirm(`确定${action}这个用户吗？`)) return;
+  const button = document.querySelector(`#toggleUser${id}`);
+  if (button) button.disabled = true;
+  setMessage(usersMessage, `正在${action}...`);
+  try {
+    await api(`/api/admin/users/${id}/${disabled ? 'disable' : 'enable'}`, { method: 'POST', body: '{}' });
+    await refreshAdminDataForUser(id);
+    setMessage(usersMessage, `已${action}`, true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+    if (button) button.disabled = false;
+  }
+}
+
+loginForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(loginForm).entries());
+  setMessage(loginMessage, '正在登录...');
+  try {
+    const data = await api('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    loginForm.password.value = '';
+    setMessage(loginMessage, '', true);
+    showAdmin(data.admin);
+    await loadUsers();
+    await loadAppVersions();
+    await loadAdminChatMessages();
+  } catch (error) {
+    setMessage(loginMessage, error.message);
+  }
+});
+
+adminMenuItems.forEach(item => {
+  item.addEventListener('click', () => switchAdminView(item.dataset.adminTarget));
+});
+
+document.querySelector('#refreshAppVersionsBtn').addEventListener('click', async () => {
+  try {
+    await loadAppVersions();
+    setMessage(appUpdateMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(appUpdateMessage, error.message);
+  }
+});
+
+appVersionForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  setMessage(appUpdateMessage, '正在上传 APK...');
+  const formData = new FormData(appVersionForm);
+  try {
+    const res = await fetch('/api/admin/app-versions', {
+      method: 'POST',
+      body: formData
+    });
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!res.ok) throw new Error(data.error || '上传失败');
+    appVersionForm.reset();
+    await loadAppVersions();
+    setMessage(appUpdateMessage, `已发布 ${data.version.version_name}`, true);
+  } catch (error) {
+    setMessage(appUpdateMessage, error.message);
+  }
+});
+
+document.querySelector('#logoutBtn').addEventListener('click', async () => {
+  await api('/api/admin/logout', { method: 'POST', body: '{}' });
+  location.reload();
+});
+
+document.querySelector('#refreshBtn').addEventListener('click', async () => {
+  try {
+    await loadUsers();
+    setMessage(usersMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+});
+
+adminPushForm.addEventListener('submit', sendAdminPushMessage);
+
+userSelectAllAdmin.addEventListener('change', () => {
+  document.querySelectorAll('.user-check-admin:not(:disabled)').forEach(item => {
+    item.checked = userSelectAllAdmin.checked;
+  });
+});
+
+userRows.addEventListener('change', event => {
+  if (!event.target.classList.contains('user-check-admin')) return;
+  const checks = Array.from(document.querySelectorAll('.user-check-admin:not(:disabled)'));
+  userSelectAllAdmin.checked = checks.length > 0 && checks.every(item => item.checked);
+});
+
+adminMenuItems.forEach(item => {
+  item.addEventListener('click', () => switchAdminView(item.dataset.adminTarget));
+});
+
+document.querySelector('#refreshChatAdminBtn').addEventListener('click', async () => {
+  try {
+    await loadAdminChatMessages();
+    setMessage(chatAdminMessage, '已刷新', true);
+  } catch (error) {
+    setMessage(chatAdminMessage, error.message);
+  }
+});
+
+chatSelectAllAdmin.addEventListener('change', () => {
+  document.querySelectorAll('.chat-check-admin').forEach(item => {
+    item.checked = chatSelectAllAdmin.checked;
+  });
+});
+
+chatRowsAdmin.addEventListener('change', event => {
+  if (!event.target.classList.contains('chat-check-admin')) return;
+  const checks = Array.from(document.querySelectorAll('.chat-check-admin'));
+  chatSelectAllAdmin.checked = checks.length > 0 && checks.every(item => item.checked);
+});
+
+document.querySelector('#deleteSelectedChatBtn').addEventListener('click', deleteSelectedAdminChatMessages);
+document.querySelector('#deleteChatRangeBtn').addEventListener('click', deleteAdminChatRange);
+
+document.querySelector('#syncMissingBtn').addEventListener('click', async () => {
+  if (!window.confirm('本次最多补全 20 个缺失姓名的用户，继续吗？')) return;
+  setMessage(usersMessage, '正在补全缺失姓名...');
+  try {
+    const data = await api('/api/admin/users/sync-missing-profiles', { method: 'POST', body: '{}' });
+    renderUsers(data);
+    setMessage(usersMessage, `已处理 ${data.processed} 个用户`, true);
+  } catch (error) {
+    setMessage(usersMessage, error.message);
+  }
+});
+
+document.querySelector('#closeDetailBtn').addEventListener('click', () => {
+  selectedUserId = null;
+  detailPanel.classList.add('hidden');
+});
+
+detailSyncBtn.addEventListener('click', () => {
+  if (selectedUserId) syncUser(selectedUserId);
+});
+
+loadMe().catch(() => showLogin());
+</script>
+</body>
+</html>

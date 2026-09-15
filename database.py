@@ -1,10 +1,94 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from contextlib import contextmanager
+import queue
+import threading
 
 import pymysql
 from pymysql.cursors import DictCursor
 
 import config
+
+
+class ConnectionPool:
+    def __init__(self, max_connections: int = 20, timeout: float = 10.0):
+        self.max_connections = max_connections
+        self.timeout = timeout
+        self._pool = queue.Queue(maxsize=max_connections)
+        self._created = 0
+        self._lock = threading.Lock()
+
+    def _create_connection(self):
+        return pymysql.connect(
+            host=config.DB_HOST,
+            port=config.DB_PORT,
+            user=config.DB_USER,
+            password=config.DB_PASSWORD,
+            database=config.DB_NAME,
+            charset="utf8mb4",
+            autocommit=True,
+            cursorclass=DictCursor,
+        )
+
+    def get_connection(self):
+        try:
+            conn = self._pool.get_nowait()
+        except queue.Empty:
+            with self._lock:
+                if self._created < self.max_connections:
+                    self._created += 1
+                    return self._create_connection()
+            conn = self._pool.get(timeout=self.timeout)
+
+        try:
+            conn.ping()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = self._create_connection()
+
+        return conn
+
+    def release_connection(self, conn):
+        if conn is None:
+            return
+        try:
+            if not self._pool.full():
+                self._pool.put_nowait(conn)
+            else:
+                conn.close()
+                with self._lock:
+                    self._created -= 1
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._created -= 1
+
+    def close_all(self):
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+                conn.close()
+            except queue.Empty:
+                break
+        with self._lock:
+            self._created = 0
+
+
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def get_pool() -> ConnectionPool:
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                _POOL = ConnectionPool(max_connections=25, timeout=10.0)
+    return _POOL
 
 
 def server_connection():
@@ -19,17 +103,14 @@ def server_connection():
     )
 
 
+@contextmanager
 def connection():
-    return pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-        database=config.DB_NAME,
-        charset="utf8mb4",
-        autocommit=True,
-        cursorclass=DictCursor,
-    )
+    pool = get_pool()
+    conn = pool.get_connection()
+    try:
+        yield conn
+    finally:
+        pool.release_connection(conn)
 
 
 def init_db() -> None:
