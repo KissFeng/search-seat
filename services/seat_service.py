@@ -423,7 +423,16 @@ def build_occupied_reserves(reserves: list, room_id: str, day: str) -> tuple:
     return occupied_details, occupied_by_seat
 
 
-def build_seat_response(room: dict, day: str, start_time: str, end_time: str, result: dict, payload: dict) -> dict:
+def build_seat_response(
+    room: dict,
+    day: str,
+    start_time: str,
+    end_time: str,
+    result: dict,
+    payload: dict,
+    include_pairs: bool = False,
+    include_occupied_details: bool = False,
+) -> dict:
     room_id = str(room["room_id"])
     seat_min, seat_max, seat_width = room_seat_config(room)
     all_seats = chaoxing.build_all_seats(seat_min, seat_max, seat_width)
@@ -431,9 +440,22 @@ def build_seat_response(room: dict, day: str, start_time: str, end_time: str, re
     occupied = sorted({item["seatNum"] for item in raw_reserves if item.get("seatNum")})
     raw_available = [seat for seat in all_seats if seat not in set(occupied)]
     available, filtered_seats, applied_filters = filter_unwanted_seats(room_id, raw_available, seat_width, payload)
-    pairs = chaoxing.find_adjacent_pairs(available, seat_width)
 
-    occupied_details, occupied_by_seat = build_occupied_reserves(raw_reserves, room_id, day)
+    pairs = []
+    if include_pairs:
+        raw_pairs = chaoxing.find_adjacent_pairs(available, seat_width)
+        pairs = [
+            {
+                "seats": pair,
+                "url": local_reserve_path(room_id, day, "-".join(pair)),
+            }
+            for pair in raw_pairs
+        ]
+
+    occupied_details = []
+    occupied_by_seat = {}
+    if include_occupied_details:
+        occupied_details, occupied_by_seat = build_occupied_reserves(raw_reserves, room_id, day)
 
     return {
         "room_id": room_id,
@@ -451,13 +473,7 @@ def build_seat_response(room: dict, day: str, start_time: str, end_time: str, re
         "occupied_by_seat": occupied_by_seat,
         "filtered": filtered_seats,
         "filters": applied_filters,
-        "pairs": [
-            {
-                "seats": pair,
-                "url": local_reserve_path(room_id, day, "-".join(pair)),
-            }
-            for pair in pairs
-        ],
+        "pairs": pairs,
         "summary": {
             "total": len(all_seats),
             "available": len(available),

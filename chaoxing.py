@@ -379,7 +379,6 @@ def query_seats(
     start_time: str,
     end_time: str,
 ) -> dict:
-    prepare_office_session(session, room_id, fid_enc, day)
     data = {
         "roomId": room_id,
         "startTime": start_time,
@@ -387,7 +386,18 @@ def query_seats(
         "day": day,
         "fidEnc": fid_enc,
     }
-    resp = session.post(config.CHAOXING_USED_SEATS_URL, headers=build_headers(room_id, fid_enc, day), data=data, timeout=12)
+    headers = build_headers(room_id, fid_enc, day)
+    try:
+        resp = session.post(config.CHAOXING_USED_SEATS_URL, headers=headers, data=data, timeout=12)
+        if resp.status_code == 200:
+            result = resp.json()
+            if isinstance(result, dict) and result.get("success"):
+                return result
+    except Exception:
+        pass
+
+    prepare_office_session(session, room_id, fid_enc, day)
+    resp = session.post(config.CHAOXING_USED_SEATS_URL, headers=headers, data=data, timeout=12)
     resp.raise_for_status()
     return resp.json()
 

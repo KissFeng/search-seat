@@ -162,6 +162,7 @@ from services.watch_service import (
     WATCH_WORKER_STARTED,
     WATCH_WORKER_LOCK,
 )
+from services.sync_service import start_auto_sync_worker
 
 ADMIN_HTML = get_template("admin.html")
 INDEX_HTML = get_template("index.html")
@@ -1287,11 +1288,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         response = build_seat_response(room, day, start_time, end_time, result, payload)
-        raw_reserves = chaoxing.parse_seat_reserves(result, room_seat_width(room_id))
-        try:
-            save_occupied_reservations(room_id, day, raw_reserves)
-        except Exception:
-            pass
         update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
 
         history_id = save_query_history(
@@ -1393,6 +1389,7 @@ def main() -> None:
     config.ensure_secret()
     database.init_db()
     start_watch_worker()
+    start_auto_sync_worker()
     server = ThreadingHTTPServer((config.APP_HOST, config.APP_PORT), AppHandler)
     print(f"Search Seat 已启动：http://127.0.0.1:{config.APP_PORT}")
     server.serve_forever()

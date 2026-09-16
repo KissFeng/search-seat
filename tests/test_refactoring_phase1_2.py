@@ -148,9 +148,8 @@ class RefactoringPhase1And2Tests(unittest.TestCase):
         self.assertIn("<!doctype html>", admin_html.lower())
         self.assertIn("座位雷达管理后台", admin_html)
 
-    def test_build_seat_response_with_pairs(self):
+    def test_build_seat_response_default(self):
         room = {"room_id": "12818", "label": "2F-阅览区", "seat_min": 1, "seat_max": 5, "seat_width": 3}
-        # mock chaoxing seat reservation response (no reservations)
         mock_result = {
             "success": True,
             "data": {
@@ -161,7 +160,25 @@ class RefactoringPhase1And2Tests(unittest.TestCase):
         response = build_seat_response(room, "2026-09-15", "08:00", "12:00", mock_result, payload)
         self.assertEqual(response["room_id"], "12818")
         self.assertEqual(len(response["available"]), 5)
-        # Seats 001..005 have adjacent pairs: [001, 002], [003, 004] (as pairs cannot overlap or depend on width)
+        self.assertEqual(response["pairs"], [])
+        self.assertEqual(response["occupied_details"], [])
+        self.assertEqual(response["summary"]["total"], 5)
+        self.assertEqual(response["summary"]["available"], 5)
+        self.assertEqual(response["summary"]["occupied"], 0)
+        self.assertEqual(response["summary"]["filtered"], 0)
+
+    def test_build_seat_response_with_pairs(self):
+        room = {"room_id": "12818", "label": "2F-阅览区", "seat_min": 1, "seat_max": 5, "seat_width": 3}
+        mock_result = {
+            "success": True,
+            "data": {
+                "seatReservationList": []
+            }
+        }
+        payload = {"ignore_no_power": False, "ignore_sunny": False}
+        response = build_seat_response(room, "2026-09-15", "08:00", "12:00", mock_result, payload, include_pairs=True)
+        self.assertEqual(response["room_id"], "12818")
+        self.assertEqual(len(response["available"]), 5)
         self.assertIsInstance(response["pairs"], list)
         self.assertGreater(len(response["pairs"]), 0)
         first_pair = response["pairs"][0]

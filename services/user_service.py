@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import concurrent.futures
+from datetime import datetime, timezone, timedelta
 import json
 from json import loads
 import sys
@@ -12,6 +13,8 @@ import chaoxing
 import config
 import database
 from services import seat_service
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 _CURRENT_RESERVES_CACHE = {}
 _CURRENT_RESERVES_CACHE_LOCK = threading.Lock()
@@ -197,7 +200,7 @@ def invalidate_user_reserves_cache(user_id: int) -> None:
 
 def _do_fetch_chaoxing_reserves(user_id: int, cookies_json: str) -> dict:
     now = time.time()
-    now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
     session = chaoxing.session_from_cookie_json(cookies_json)
     try:
         result = chaoxing.fetch_seat_index(session, config.FID_ENC)
@@ -225,10 +228,10 @@ def _do_fetch_chaoxing_reserves(user_id: int, cookies_json: str) -> dict:
         _get_db().execute(
             """
             UPDATE chaoxing_sessions
-            SET current_reserves_json = %s, reserves_updated_at = NOW()
+            SET current_reserves_json = %s, reserves_updated_at = %s
             WHERE user_id = %s
             """,
-            (json.dumps(reserves, ensure_ascii=False), user_id),
+            (json.dumps(reserves, ensure_ascii=False), now_str, user_id),
         )
     except Exception:
         pass

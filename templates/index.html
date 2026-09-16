@@ -362,7 +362,7 @@
       font-size: 13px;
       background: rgba(255, 255, 255, .72);
     }
-    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
     .stat {
       position: relative;
       overflow: hidden;
@@ -381,7 +381,7 @@
       width: 4px;
       background: var(--line);
     }
-    .stat:nth-child(2)::before, .stat:nth-child(5)::before { background: var(--available); }
+    .stat:nth-child(2)::before { background: var(--available); }
     .stat:nth-child(3)::before { background: #6f7b74; }
     .stat:nth-child(4)::before { background: var(--lamp); }
     .stat b {
@@ -1045,16 +1045,11 @@
             <div class="stat">可预约 <b id="statAvailable">0</b></div>
             <div class="stat">已占用 <b id="statOccupied">0</b></div>
             <div class="stat">已过滤 <b id="statFiltered">0</b></div>
-            <div class="stat">连排座 <b id="statPairs">0</b></div>
           </div>
-          <div class="tabs">
-            <button class="tab active" type="button" data-tab="seats">可预约座位</button>
-            <button class="tab" type="button" data-tab="pairs">双人连排</button>
-            <button class="tab" type="button" data-tab="occupied">已占用 / 谁在约</button>
+          <div class="section-head" style="margin-top: 4px; margin-bottom: 8px;">
+            <h2>可预约座位</h2>
           </div>
           <div id="seatGrid" class="seat-grid"></div>
-          <div id="pairGrid" class="seat-grid pair-grid hidden"></div>
-          <div id="occupiedList" class="occupied-list hidden"></div>
         </div>
 
       </section>
@@ -1215,7 +1210,6 @@
                 <th>房间</th>
                 <th>可预约</th>
                 <th>已占用</th>
-                <th>连排</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -1309,16 +1303,11 @@
           <div class="stat">可预约 <b id="modalStatAvailable">0</b></div>
           <div class="stat">已占用 <b id="modalStatOccupied">0</b></div>
           <div class="stat">已过滤 <b id="modalStatFiltered">0</b></div>
-          <div class="stat">连排座 <b id="modalStatPairs">0</b></div>
         </div>
-        <div class="tabs">
-          <button class="tab active" type="button" data-modal-tab="seats">可预约座位</button>
-          <button class="tab" type="button" data-modal-tab="pairs">双人连排</button>
-          <button class="tab" type="button" data-modal-tab="occupied">已占用 / 谁在约</button>
+        <div class="section-head" style="margin-top: 4px; margin-bottom: 8px;">
+          <h2>可预约座位</h2>
         </div>
         <div id="modalSeatGrid" class="seat-grid"></div>
-        <div id="modalPairGrid" class="seat-grid pair-grid hidden"></div>
-        <div id="modalOccupiedList" class="occupied-list hidden"></div>
       </div>
 
     </div>
@@ -1424,8 +1413,6 @@ const resultsPanel = document.querySelector('#resultsPanel');
 const resultsEmpty = document.querySelector('#resultsEmpty');
 const resultsContent = document.querySelector('#resultsContent');
 const seatGrid = document.querySelector('#seatGrid');
-const pairGrid = document.querySelector('#pairGrid');
-const occupiedList = document.querySelector('#occupiedList');
 const timetableDownloadBtn = document.querySelector('#timetableDownloadBtn');
 const timetableEmpty = document.querySelector('#timetableEmpty');
 const timetableContent = document.querySelector('#timetableContent');
@@ -1454,8 +1441,6 @@ const historyModalMeta = document.querySelector('#historyModalMeta');
 const historyModalEmpty = document.querySelector('#historyModalEmpty');
 const historyModalContent = document.querySelector('#historyModalContent');
 const modalSeatGrid = document.querySelector('#modalSeatGrid');
-const modalPairGrid = document.querySelector('#modalPairGrid');
-const modalOccupiedList = document.querySelector('#modalOccupiedList');
 
 const watchAlertModal = document.querySelector('#watchAlertModal');
 const watchAlertMeta = document.querySelector('#watchAlertMeta');
@@ -1800,7 +1785,6 @@ function renderCurrentReserves(reserves) {
   currentReserveCards.innerHTML = reserves.map(item => {
     const badgeClass = currentReserveStatusClass(item.status, item.status_label);
     const detail = [
-      item.room_name || item.room_id,
       item.day,
       item.time_range
     ].filter(Boolean).join(' · ');
@@ -1840,9 +1824,8 @@ async function loadCurrentReserves({ silent = false, force = false } = {}) {
     const url = force ? '/api/seats/current-reserves?force=1' : '/api/seats/current-reserves';
     const data = await api(url, { method: 'GET', headers: {} });
     renderCurrentReserves(data.reserves || []);
-    const timeStr = data.updated_at ? (data.updated_at.split(' ')[1] || data.updated_at) : new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    const tag = data.stale ? ' (校准中)' : '';
-    currentReservesStatus.textContent = `已同步 · ${timeStr}${tag}`;
+    const timeStr = data.updated_at ? (data.updated_at.split(' ')[1] || data.updated_at) : new Date().toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+    currentReservesStatus.textContent = `已同步 · ${timeStr}`;
     currentReservesStatus.classList.remove('hidden');
   } catch (error) {
     currentReservesStatus.textContent = error.message;
@@ -2081,12 +2064,11 @@ function renderHistoryRows() {
     <td data-label="房间">${escapeHtml(row.room_name || row.room_id)}</td>
     <td data-label="可预约">${row.available_count}</td>
     <td data-label="已占用">${row.occupied_count}</td>
-    <td data-label="连排">${row.pair_count}</td>
     <td data-label="操作"><span class="table-actions">
       <button class="text-button" type="button" onclick="viewHistory(${row.id})">查看</button>
       <button class="text-button danger" type="button" onclick="deleteHistory(${row.id})">删除</button>
     </span></td>
-  </tr>`).join('') || '<tr><td colspan="9">暂无记录</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="8">暂无记录</td></tr>';
   historyCards.innerHTML = visibleHistory.map(row => `<article class="mobile-card">
     <div class="mobile-card-head">
       <div>
@@ -2101,7 +2083,6 @@ function renderHistoryRows() {
     <div class="mobile-meta">
       <div class="mobile-meta-item"><span>可预约</span><b>${row.available_count}</b></div>
       <div class="mobile-meta-item"><span>已占用</span><b>${row.occupied_count}</b></div>
-      <div class="mobile-meta-item"><span>连排</span><b>${row.pair_count}</b></div>
     </div>
   </article>`).join('') || '<div class="mobile-empty">暂无记录</div>';
   historySelectAll.checked = false;
@@ -2280,65 +2261,14 @@ function renderResults(result) {
   document.querySelector('#statAvailable').textContent = result.summary.available;
   document.querySelector('#statOccupied').textContent = result.summary.occupied;
   document.querySelector('#statFiltered').textContent = result.summary.filtered || 0;
-  document.querySelector('#statPairs').textContent = result.summary.pairs;
-  renderSeatLists(result, seatGrid, pairGrid, occupiedList);
-  setTab('seats');
+  renderSeatLists(result, seatGrid);
   switchAppView('resultsPanel');
 }
 
-function renderSeatLists(result, seatTarget, pairTarget, occupiedTarget) {
-  seatTarget.innerHTML = result.available.map(item =>
+function renderSeatLists(result, seatTarget) {
+  seatTarget.innerHTML = (result.available || []).map(item =>
     `<a class="seat" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.seat)}</a>`
   ).join('') || '<div class="muted">没有可预约座位</div>';
-  pairTarget.innerHTML = result.pairs.map(item =>
-    `<a class="pair" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.seats.join(' + '))}</a>`
-  ).join('') || '<div class="muted">没有双人连排</div>';
-
-  if (occupiedTarget) {
-    const details = result.occupied_details || [];
-    if (!details.length) {
-      occupiedTarget.innerHTML = '<div class="muted" style="padding:16px;">当前时段无占用记录或座位全部空闲</div>';
-      return;
-    }
-    occupiedTarget.innerHTML = `
-      <div class="occupied-toolbar">
-        <input type="text" class="occupied-filter-input" placeholder="输入座位号 / 姓名 / UID 快速筛选..." oninput="filterOccupiedList(this, '${occupiedTarget.id}')">
-        <div class="muted">共 <b>${details.length}</b> 条占用记录</div>
-      </div>
-      <div class="occupied-cards-grid">
-        ${details.map(item => `
-          <div class="occupied-card" data-search="${escapeHtml(((item.seat_num || '') + ' ' + (item.user_name || '') + ' ' + (item.uid || '')).toLowerCase())}">
-            <div class="occupied-card-top">
-              <div class="occupied-seat-num">#${escapeHtml(item.seat_num)}</div>
-              <span class="badge-status badge-${escapeHtml(item.badge_type || 'neutral')}">${escapeHtml(item.status_label || '已占用')}</span>
-            </div>
-            <div class="occupied-time-row">
-              <span>🕒</span>
-              <span class="occupied-time">${escapeHtml(item.time_range || (item.start_time + '-' + item.end_time))}</span>
-            </div>
-            <div class="occupied-user-row">
-              ${item.avatar_url ? `<img class="occupied-user-avatar" src="${escapeHtml(item.avatar_url)}" alt="avatar" onerror="this.style.display='none'" />` : '<div class="occupied-user-avatar-placeholder">👤</div>'}
-              <div class="occupied-user-info">
-                <div class="occupied-user-name">${escapeHtml(item.user_name || '超星用户')}</div>
-                <div class="occupied-user-uid">UID: ${escapeHtml(String(item.uid))}</div>
-              </div>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-  }
-}
-
-function filterOccupiedList(input, targetId) {
-  const query = (input.value || '').trim().toLowerCase();
-  const container = document.getElementById(targetId);
-  if (!container) return;
-  const cards = container.querySelectorAll('.occupied-card');
-  cards.forEach(card => {
-    const text = card.getAttribute('data-search') || '';
-    card.style.display = (!query || text.includes(query)) ? '' : 'none';
-  });
 }
 
 
@@ -2395,9 +2325,7 @@ function openHistoryModal(result) {
   document.querySelector('#modalStatAvailable').textContent = result.summary.available;
   document.querySelector('#modalStatOccupied').textContent = result.summary.occupied;
   document.querySelector('#modalStatFiltered').textContent = result.summary.filtered || 0;
-  document.querySelector('#modalStatPairs').textContent = result.summary.pairs;
-  renderSeatLists(result, modalSeatGrid, modalPairGrid, modalOccupiedList);
-  setModalTab('seats');
+  renderSeatLists(result, modalSeatGrid);
   historyModal.classList.remove('hidden');
 }
 
@@ -2458,18 +2386,14 @@ async function cancelWatchTask(id) {
 
 function setTab(tab) {
   document.querySelectorAll('[data-tab]').forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
-  seatGrid.classList.toggle('hidden', tab !== 'seats');
-  pairGrid.classList.toggle('hidden', tab !== 'pairs');
-  if (occupiedList) occupiedList.classList.toggle('hidden', tab !== 'occupied');
+  if (seatGrid) seatGrid.classList.toggle('hidden', tab !== 'seats');
 }
 
 function setModalTab(tab) {
   document.querySelectorAll('[data-modal-tab]').forEach(button => {
     button.classList.toggle('active', button.dataset.modalTab === tab);
   });
-  modalSeatGrid.classList.toggle('hidden', tab !== 'seats');
-  modalPairGrid.classList.toggle('hidden', tab !== 'pairs');
-  if (modalOccupiedList) modalOccupiedList.classList.toggle('hidden', tab !== 'occupied');
+  if (modalSeatGrid) modalSeatGrid.classList.toggle('hidden', tab !== 'seats');
 }
 
 
