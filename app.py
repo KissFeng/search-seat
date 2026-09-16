@@ -103,6 +103,11 @@ from services.seat_service import (
     fetch_user_query_history,
     RESERVE_STATUS_LABELS,
     CHECKIN_WINDOW_MINUTES,
+    save_occupied_reservations,
+    query_seat_reservations,
+    query_user_reservations,
+    fetch_seat_user_profiles,
+    save_or_update_user_profile,
 )
 from services.transcript_service import (
     normalize_student_info,
@@ -133,6 +138,11 @@ from services.user_service import (
     admin_summary,
     first_query_value,
     admin_pagination,
+)
+from services.chaoxing_group_service import (
+    get_group_contact_stats,
+    harvest_all_sessions_groups,
+    trigger_harvest_background,
 )
 from services.watch_service import (
     validate_watch_interval,
@@ -272,12 +282,25 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/chat/messages":
                 self.handle_admin_chat_messages()
                 return
+            if path == "/api/admin/seat-reservations":
+                self.handle_admin_seat_reservations(parsed)
+                return
+            if path == "/api/admin/user-reservations":
+                self.handle_admin_user_reservations(parsed)
+                return
+            if path == "/api/admin/seat-users":
+                self.handle_admin_seat_users(parsed)
+                return
+            if path == "/api/admin/contacts/stats":
+                self.handle_admin_contacts_stats()
+                return
             if path.startswith("/api/admin/users/") and path.endswith("/cookie"):
                 self.handle_admin_user_cookie(path)
                 return
             if path.startswith("/api/admin/users/"):
                 self.handle_admin_user_detail(parsed)
                 return
+
             if path == "/api/app-update/android":
                 self.handle_android_app_update(parsed)
                 return
@@ -395,7 +418,17 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/app-versions":
                 self.handle_admin_app_version_upload()
                 return
+            if path == "/api/admin/seat-users/save":
+                self.handle_admin_seat_user_save()
+                return
+            if path == "/api/admin/seat-reservations/fetch":
+                self.handle_admin_seat_fetch_realtime()
+                return
+            if path == "/api/admin/contacts/sync":
+                self.handle_admin_contacts_sync()
+                return
             if path == "/api/chaoxing/login":
+
                 self.handle_chaoxing_login()
                 return
             if path == "/api/chaoxing/timetable":
@@ -453,13 +486,25 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         self.send_json(
             200,
-            {"ok": True, "admin": {"username": username}},
+            {
+                "ok": True,
+                "admin": {"username": username},
+                "rooms": [public_room(room) for room in config.ROOMS],
+                "default_room_id": config.ROOMS[0]["room_id"] if config.ROOMS else "",
+            },
             headers=[("Set-Cookie", auth.make_admin_session_cookie(username))],
         )
 
     def handle_admin_me(self):
         admin = self.current_admin()
-        self.send_json(200, {"admin": admin})
+        self.send_json(
+            200,
+            {
+                "admin": admin,
+                "rooms": [public_room(room) for room in config.ROOMS],
+                "default_room_id": config.ROOMS[0]["room_id"] if config.ROOMS else "",
+            },
+        )
 
     def handle_admin_users(self):
         if not self.require_admin():
@@ -730,6 +775,104 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         result = send_admin_push_message(self.read_json())
         self.send_json(200, {"ok": True, "result": result})
+
+    def handle_admin_seat_reservations(self, parsed):
+        if not self.require_admin():
+            return
+        params = parse_qs(parsed.query)
+        room_id = (params.get("room_id") or [""])[0].strip() or None
+        day = (params.get("day") or [""])[0].strip() or None
+        seat_num = (params.get("seat_num") or [""])[0].strip() or None
+        limit = int((params.get("limit") or ["200"])[0]) if (params.get("limit") or ["200"])[0].isdigit() else 200
+        reservations = query_seat_reservations(room_id=room_id, day=day, seat_num=seat_num, limit=limit)
+        self.send_json(200, {"reservations": reservations, "count": len(reservations)})
+
+    def handle_admin_user_reservations(self, parsed):
+        if not self.require_admin():
+            return
+        params = parse_qs(parsed.query)
+        keyword = (params.get("keyword") or [""])[0].strip()
+        day = (params.get("day") or [""])[0].strip() or None
+        limit = int((params.get("limit") or ["100"])[0]) if (params.get("limit") or ["100"])[0].isdigit() else 100
+        reservations = query_user_reservations(keyword=keyword, day=day, limit=limit)
+        self.send_json(200, {"reservations": reservations, "count": len(reservations), "keyword": keyword})
+
+    def handle_admin_seat_users(self, parsed):
+        if not self.require_admin():
+            return
+        params = parse_qs(parsed.query)
+        keyword = (params.get("keyword") or [""])[0].strip() or None
+        limit = int((params.get("limit") or ["100"])[0]) if (params.get("limit") or ["100"])[0].isdigit() else 100
+        users = fetch_seat_user_profiles(keyword=keyword, limit=limit)
+        self.send_json(200, {"users": users, "count": len(users)})
+
+    def handle_admin_seat_user_save(self):
+        if not self.require_admin():
+            return
+        payload = self.read_json()
+        uid = int(payload.get("uid")) if str(payload.get("uid", "")).isdigit() else 0
+        if not uid:
+            self.send_json(400, {"error": "UID 必须是有效数字"})
+            return
+        real_name = str(payload.get("real_name") or "").strip() or None
+        account = str(payload.get("account") or "").strip() or None
+        save_or_update_user_profile(uid, real_name=real_name, account=account, source="manual")
+        self.send_json(200, {"ok": True, "uid": uid, "real_name": real_name, "account": account})
+
+    def handle_admin_seat_fetch_realtime(self):
+        if not self.require_admin():
+            return
+        payload = self.read_json()
+        room_id = str(payload.get("room_id") or config.ROOMS[0]["room_id"]).strip()
+        room = get_room(room_id)
+        day = validate_day(str(payload.get("day") or date.today().strftime("%Y-%m-%d")).strip())
+        start_time = str(payload.get("start_time") or "08:00").strip()
+        end_time = str(payload.get("end_time") or "22:00").strip()
+        start_time, end_time = validate_time_range(start_time, end_time)
+
+        sessions = database.fetch_all(
+            "SELECT cookies_json FROM chaoxing_sessions WHERE session_valid = 1 ORDER BY last_login_at DESC LIMIT 5"
+        )
+        if not sessions:
+            self.send_json(400, {"error": "系统中无有效的超星会话，无法实时抓取"})
+            return
+
+        last_error = None
+        for s in sessions:
+            try:
+                session = chaoxing.session_from_cookie_json(s["cookies_json"])
+                res = chaoxing.query_seats(session, room_id, str(room["fid_enc"]), day, start_time, end_time)
+                if res.get("success"):
+                    raw_reserves = chaoxing.parse_seat_reserves(res, room_seat_width(room_id))
+                    count = save_occupied_reservations(room_id, day, raw_reserves)
+                    reservations = query_seat_reservations(room_id=room_id, day=day, limit=300)
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "room_id": room_id,
+                            "day": day,
+                            "saved_count": count,
+                            "reservations": reservations,
+                        },
+                    )
+                    return
+            except Exception as e:
+                last_error = str(e)
+        self.send_json(502, {"error": f"实时抓取超星座位失败：{last_error or '未知错误'}"})
+
+    def handle_admin_contacts_stats(self):
+        if not self.require_admin():
+            return
+        stats = get_group_contact_stats()
+        self.send_json(200, stats)
+
+    def handle_admin_contacts_sync(self):
+        if not self.require_admin():
+            return
+        result = harvest_all_sessions_groups()
+        self.send_json(200, result)
+
 
     def handle_me(self):
         user = self.current_user()
@@ -1103,6 +1246,7 @@ class AppHandler(BaseHTTPRequestHandler):
         cookies_json = chaoxing.cookie_jar_to_json(session)
         save_chaoxing_session(user["id"], account, cookies_json)
         sync_chaoxing_profile(user["id"], cookies_json)
+        trigger_harvest_background(user["id"], cookies_json, account)
         self.send_json(
             200,
             {"ok": True, "account": account, "user": user},
@@ -1143,7 +1287,13 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         response = build_seat_response(room, day, start_time, end_time, result, payload)
+        raw_reserves = chaoxing.parse_seat_reserves(result, room_seat_width(room_id))
+        try:
+            save_occupied_reservations(room_id, day, raw_reserves)
+        except Exception:
+            pass
         update_chaoxing_cookies(user["id"], chaoxing.cookie_jar_to_json(session))
+
         history_id = save_query_history(
             user["id"],
             {

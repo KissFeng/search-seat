@@ -317,6 +317,112 @@ def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seat_user_profiles (
+                    uid BIGINT UNSIGNED NOT NULL,
+                    real_name VARCHAR(128) NULL,
+                    account VARCHAR(128) NULL,
+                    avatar_url VARCHAR(255) NULL,
+                    source VARCHAR(32) NOT NULL DEFAULT 'sync',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (uid),
+                    KEY idx_seat_user_profiles_name (real_name),
+                    KEY idx_seat_user_profiles_account (account)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seat_reservations (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    reserve_id BIGINT UNSIGNED NOT NULL,
+                    room_id VARCHAR(64) NOT NULL,
+                    seat_num VARCHAR(32) NOT NULL,
+                    day DATE NOT NULL,
+                    start_time VARCHAR(5) NOT NULL,
+                    end_time VARCHAR(5) NOT NULL,
+                    start_time_ms BIGINT NOT NULL,
+                    end_time_ms BIGINT NOT NULL,
+                    status INT NOT NULL,
+                    uid BIGINT UNSIGNED NOT NULL,
+                    user_name VARCHAR(128) NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_seat_reservations_reserve (reserve_id),
+                    KEY idx_seat_res_room_day_seat (room_id, day, seat_num),
+                    KEY idx_seat_res_uid_day (uid, day),
+                    KEY idx_seat_res_day (day)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seat_group_members (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    group_id VARCHAR(64) NOT NULL,
+                    group_name VARCHAR(256) NOT NULL,
+                    uid BIGINT UNSIGNED NOT NULL,
+                    real_name VARCHAR(128) NOT NULL,
+                    avatar_url VARCHAR(512) NULL,
+                    source_account VARCHAR(128) NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_group_member (group_id, uid),
+                    KEY idx_group_members_uid (uid),
+                    KEY idx_group_members_name (real_name),
+                    KEY idx_group_members_gid (group_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            sync_initial_user_profiles(cursor)
+
+
+def sync_initial_user_profiles(cursor) -> None:
+    try:
+        import json
+        import re
+
+        cursor.execute("SELECT cx_account, cx_user_name, cookies_json FROM chaoxing_sessions")
+        sessions = cursor.fetchall()
+        for row in sessions:
+            account = row.get("cx_account")
+            user_name = row.get("cx_user_name")
+            cookies_raw = row.get("cookies_json")
+            if not cookies_raw:
+                continue
+            uid = None
+            try:
+                cookies = json.loads(cookies_raw)
+                for c in cookies:
+                    if c.get("name") in ("UID", "_uid", "oa_uid") and str(c.get("value", "")).isdigit():
+                        uid = int(c["value"])
+                        break
+            except Exception:
+                pass
+            if not uid:
+                match = re.search(r'["\']?(?:UID|_uid|oa_uid)["\']?\s*[:=]\s*["\']?(\d+)', cookies_raw)
+                if match:
+                    uid = int(match.group(1))
+            if uid:
+                avatar_url = f"https://photo.chaoxing.com/p/{uid}_80"
+                cursor.execute(
+                    """
+                    INSERT INTO seat_user_profiles (uid, real_name, account, avatar_url, source)
+                    VALUES (%s, %s, %s, %s, 'login')
+                    ON DUPLICATE KEY UPDATE
+                        real_name = COALESCE(VALUES(real_name), real_name),
+                        account = COALESCE(VALUES(account), account),
+                        avatar_url = COALESCE(VALUES(avatar_url), avatar_url)
+                    """,
+                    (uid, user_name or None, account or None, avatar_url),
+                )
+    except Exception:
+        pass
+
 
 
 def ensure_column(cursor, table: str, column: str, definition: str) -> None:

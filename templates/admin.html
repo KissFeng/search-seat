@@ -4,6 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>座位雷达管理后台</title>
+  <script>
+    // 拦截与防御第三方浏览器插件（如沉浸式翻译扩展 content_main.js）在缺少 event.key 时引发的 toLowerCase 异常
+    (function() {
+      function polyfillEventKey(e) {
+        if (!e || typeof e.key === 'undefined') {
+          try {
+            Object.defineProperty(e, 'key', {
+              get: function() { return ''; },
+              configurable: true
+            });
+          } catch (_) {}
+        }
+      }
+      window.addEventListener('keydown', polyfillEventKey, true);
+      window.addEventListener('keyup', polyfillEventKey, true);
+      window.addEventListener('error', function(e) {
+        if (e && (e.filename && (e.filename.includes('content_main.js') || e.filename.includes('chrome-extension://')) || (e.message && e.message.includes('toLowerCase') && (!e.filename || e.filename.includes('content_main.js'))))) {
+          e.stopImmediatePropagation();
+          return true;
+        }
+      }, true);
+    })();
+  </script>
   <style>
     :root {
       color-scheme: light;
@@ -249,6 +272,71 @@
       .stats, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .top-user { justify-content: flex-start; }
       .admin-menu, .app-version-form { display: grid; grid-template-columns: 1fr; }
+    .user-avatar {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      object-fit: cover;
+      background: #eef3ef;
+      vertical-align: middle;
+      border: 1px solid var(--line);
+    }
+    .user-info-cell {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge-status {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .badge-status.using { background: #dff4ea; color: #0a5a3b; }
+    .badge-status.pending { background: #fff3d6; color: #7b4d0a; }
+    .badge-status.away { background: #e8eaf6; color: #283593; }
+    .badge-status.supervised { background: #f3e5f5; color: #6a1b9a; }
+    .badge-status.violation { background: #f8e3df; color: var(--red); }
+    .badge-status.other { background: #edf2ef; color: #53645c; }
+    .sub-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .sub-tab-btn {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .sub-tab-btn:hover {
+      background: var(--soft);
+      color: var(--ink);
+    }
+    .sub-tab-btn.active {
+      background: var(--green);
+      color: #fff;
+    }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 99;
+      backdrop-filter: blur(4px);
     }
   </style>
 </head>
@@ -279,6 +367,7 @@
     <div id="adminPanel" class="hidden">
       <nav class="admin-menu" aria-label="管理菜单">
         <button class="admin-menu-item active" type="button" data-admin-target="usersAdminView">用户管理</button>
+        <button class="admin-menu-item" type="button" data-admin-target="seatReservesAdminView">座位预约与反查</button>
         <button class="admin-menu-item" type="button" data-admin-target="chatAdminView">消息聊天室</button>
         <button class="admin-menu-item" type="button" data-admin-target="appUpdateAdminView">App 更新</button>
       </nav>
@@ -484,6 +573,156 @@
           <div id="appUpdateMessage" class="message"></div>
         </section>
       </div>
+
+      <div id="seatReservesAdminView" class="admin-view hidden" data-admin-view>
+        <section>
+          <div class="toolbar">
+            <div>
+              <h2>座位预约与人员反查工作台</h2>
+              <div class="muted">按座位查询被谁预约，按人员反查其预约的所有座位，维护学习通 UID 姓名映射档案。</div>
+            </div>
+          </div>
+
+          <div class="sub-tabs">
+            <button class="sub-tab-btn active" type="button" data-subtab="seat">按座位反查人员</button>
+            <button class="sub-tab-btn" type="button" data-subtab="user">按人员反查座位</button>
+            <button class="sub-tab-btn" type="button" data-subtab="profiles">UID 人员档案库</button>
+          </div>
+
+          <!-- 子模块 1: 按座位反查人员 -->
+          <div id="subtabSeatSection" class="subtab-content">
+            <form id="seatSearchForm" class="push-form" style="grid-template-columns: minmax(160px, 1.2fr) minmax(140px, 1fr) minmax(120px, 1fr) auto auto; margin-bottom: 14px;">
+              <label>阅览室
+                <select id="seatSearchRoom" name="room_id" style="min-height: 42px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; background: #fbfdfb;"></select>
+              </label>
+              <label>预约日期
+                <input id="seatSearchDay" name="day" type="date" required>
+              </label>
+              <label>座位号 (可选)
+                <input id="seatSearchNum" name="seat_num" placeholder="如 001 或 12">
+              </label>
+              <button type="submit">查询预约记录</button>
+              <button type="button" class="ghost" id="btnSyncSeatRealtime" title="调用系统会话从学习通拉取最新占座">实时同步学习通</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>预约ID</th>
+                    <th>阅览室</th>
+                    <th>日期</th>
+                    <th>座位号</th>
+                    <th>预约时段</th>
+                    <th>状态</th>
+                    <th>预约人</th>
+                    <th>UID</th>
+                    <th>记录更新时间</th>
+                  </tr>
+                </thead>
+                <tbody id="seatReserveRows">
+                  <tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">请选择阅览室和日期进行查询，或点击“实时同步学习通”</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="seatSearchMessage" class="message"></div>
+          </div>
+
+          <!-- 子模块 2: 按人员反查座位 -->
+          <div id="subtabUserSection" class="subtab-content hidden">
+            <form id="userSearchForm" class="push-form" style="grid-template-columns: minmax(280px, 2fr) auto; margin-bottom: 14px;">
+              <label>人员姓名 / UID / 账号
+                <input id="userSearchKeyword" name="keyword" placeholder="输入姓名（如：张三）、学习通 UID 或手机号/账号" required>
+              </label>
+              <button type="submit">反查该人员座位</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>预约ID</th>
+                    <th>姓名</th>
+                    <th>UID</th>
+                    <th>阅览室</th>
+                    <th>日期</th>
+                    <th>座位号</th>
+                    <th>预约时段</th>
+                    <th>状态</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody id="userReserveRows">
+                  <tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">请输入人员姓名、UID 或账号后查询</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="userSearchMessage" class="message"></div>
+          </div>
+
+          <!-- 子模块 3: UID 人员档案库 -->
+          <div id="subtabProfileSection" class="subtab-content hidden">
+            <div class="stats" style="margin-bottom: 12px;">
+              <div class="stat">群聊沉淀人员 <b id="statGroupUsers">0</b></div>
+              <div class="stat">已收录群聊 <b id="statGroupCount">0</b></div>
+              <div class="stat">人员档案总数 <b id="statTotalProfiles">0</b></div>
+            </div>
+            <div class="toolbar" style="margin-bottom: 12px;">
+              <form id="profileSearchForm" class="push-form" style="margin-bottom: 0; grid-template-columns: minmax(240px, 1fr) auto;">
+                <label style="margin: 0;">搜索档案
+                  <input id="profileSearchKeyword" name="keyword" placeholder="搜索姓名、UID、手机号">
+                </label>
+                <button type="submit">搜索</button>
+              </form>
+              <div class="row">
+                <button type="button" id="btnSyncAllChatgroups" class="secondary" title="从所有有效登录会话中爬取群聊并沉淀所有群成员到数据库">一键同步所有群聊通讯录</button>
+                <button type="button" id="btnOpenAddProfileModal">+ 录入/关联人员</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>UID</th>
+                    <th>人员</th>
+                    <th>账号 (手机号)</th>
+                    <th>数据来源</th>
+                    <th>最近更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="profileRows">
+                  <tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="profileMessage" class="message"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- 编辑/录入人员档案 Modal -->
+      <div id="profileModal" class="modal-backdrop hidden">
+        <div style="background: #fff; border-radius: 8px; width: min(460px, 92vw); padding: 20px; box-shadow: 0 16px 36px rgba(0,0,0,.2); border: 1px solid var(--line);">
+          <div class="toolbar" style="margin-bottom: 16px;">
+            <h2 id="profileModalTitle" style="margin: 0;">编辑人员档案</h2>
+            <button type="button" class="ghost" id="btnCloseProfileModal" style="min-height: 28px; padding: 4px 8px;">✕</button>
+          </div>
+          <form id="profileEditForm" style="display: grid; gap: 12px;">
+            <label>超星 UID
+              <input id="profileEditUid" name="uid" required placeholder="如 307004632">
+            </label>
+            <label>真实姓名
+              <input id="profileEditRealName" name="real_name" required placeholder="输入人员姓名">
+            </label>
+            <label>账号 / 手机号 (可选)
+              <input id="profileEditAccount" name="account" placeholder="选填">
+            </label>
+            <div class="row" style="justify-content: flex-end; margin-top: 8px;">
+              <button type="button" class="ghost" id="btnCancelProfileModal">取消</button>
+              <button type="submit">保存</button>
+            </div>
+          </form>
+        </div>
+      </div>
     </div>
   </main>
 
@@ -517,10 +756,44 @@ const chatAdminMessage = document.querySelector('#chatAdminMessage');
 const chatSelectAllAdmin = document.querySelector('#chatSelectAllAdmin');
 const chatDeleteStartAt = document.querySelector('#chatDeleteStartAt');
 const chatDeleteEndAt = document.querySelector('#chatDeleteEndAt');
+
+const seatSearchForm = document.querySelector('#seatSearchForm');
+const seatSearchRoom = document.querySelector('#seatSearchRoom');
+const seatSearchDay = document.querySelector('#seatSearchDay');
+const seatSearchNum = document.querySelector('#seatSearchNum');
+const seatReserveRows = document.querySelector('#seatReserveRows');
+const seatSearchMessage = document.querySelector('#seatSearchMessage');
+const btnSyncSeatRealtime = document.querySelector('#btnSyncSeatRealtime');
+
+const userSearchForm = document.querySelector('#userSearchForm');
+const userSearchKeyword = document.querySelector('#userSearchKeyword');
+const userReserveRows = document.querySelector('#userReserveRows');
+const userSearchMessage = document.querySelector('#userSearchMessage');
+
+const profileSearchForm = document.querySelector('#profileSearchForm');
+const profileSearchKeyword = document.querySelector('#profileSearchKeyword');
+const profileRows = document.querySelector('#profileRows');
+const profileMessage = document.querySelector('#profileMessage');
+const btnOpenAddProfileModal = document.querySelector('#btnOpenAddProfileModal');
+const btnSyncAllChatgroups = document.querySelector('#btnSyncAllChatgroups');
+const statGroupUsers = document.querySelector('#statGroupUsers');
+const statGroupCount = document.querySelector('#statGroupCount');
+const statTotalProfiles = document.querySelector('#statTotalProfiles');
+
+const profileModal = document.querySelector('#profileModal');
+const profileModalTitle = document.querySelector('#profileModalTitle');
+const profileEditForm = document.querySelector('#profileEditForm');
+const profileEditUid = document.querySelector('#profileEditUid');
+const profileEditRealName = document.querySelector('#profileEditRealName');
+const profileEditAccount = document.querySelector('#profileEditAccount');
+const btnCloseProfileModal = document.querySelector('#btnCloseProfileModal');
+const btnCancelProfileModal = document.querySelector('#btnCancelProfileModal');
+
 let selectedUserId = null;
 let users = [];
 let appVersions = [];
 let adminChatMessages = [];
+let adminRooms = [];
 let selectedQueryPage = 1;
 let selectedWatchPage = 1;
 let adminCurrentReservesRequest = 0;
@@ -571,12 +844,40 @@ function showLogin() {
   topUser.classList.add('hidden');
 }
 
-function showAdmin(admin) {
+function showAdmin(admin, data = {}) {
   loginPanel.classList.add('hidden');
   adminPanel.classList.remove('hidden');
   topUser.classList.remove('hidden');
   adminName.textContent = admin.username;
+  if (data.rooms) {
+    adminRooms = data.rooms;
+    initAdminRooms(adminRooms, data.default_room_id);
+  }
+  initSeatReservesDay();
   switchAdminView('usersAdminView');
+}
+
+function initAdminRooms(rooms, defaultRoomId) {
+  if (!seatSearchRoom) return;
+  seatSearchRoom.innerHTML = (rooms || []).map(r => `
+    <option value="${escapeHtml(r.room_id)}" ${String(r.room_id) === String(defaultRoomId) ? 'selected' : ''}>
+      ${escapeHtml(r.label || r.room_id)}
+    </option>
+  `).join('');
+}
+
+function getTodayString() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function initSeatReservesDay() {
+  if (seatSearchDay && !seatSearchDay.value) {
+    seatSearchDay.value = getTodayString();
+  }
 }
 
 function switchAdminView(targetId) {
@@ -591,6 +892,11 @@ function switchAdminView(targetId) {
   }
   if (targetId === 'chatAdminView') {
     loadAdminChatMessages().catch(error => setMessage(chatAdminMessage, error.message));
+  }
+  if (targetId === 'seatReservesAdminView') {
+    initSeatReservesDay();
+    loadContactsStats();
+    loadSeatUserProfiles().catch(error => setMessage(profileMessage, error.message));
   }
 }
 
@@ -837,7 +1143,7 @@ async function loadMe() {
     showLogin();
     return;
   }
-  showAdmin(data.admin);
+  showAdmin(data.admin, data);
   await loadUsers();
   await loadAppVersions();
   await loadAdminChatMessages();
@@ -1082,7 +1388,7 @@ loginForm.addEventListener('submit', async event => {
     });
     loginForm.password.value = '';
     setMessage(loginMessage, '', true);
-    showAdmin(data.admin);
+    showAdmin(data.admin, data);
     await loadUsers();
     await loadAppVersions();
     await loadAdminChatMessages();
@@ -1200,6 +1506,259 @@ document.querySelector('#closeDetailBtn').addEventListener('click', () => {
 detailSyncBtn.addEventListener('click', () => {
   if (selectedUserId) syncUser(selectedUserId);
 });
+
+// --- 座位预约与反查模块逻辑 ---
+
+function formatReserveBadge(status, label) {
+  let cls = 'other';
+  if (status === 1) cls = 'using';
+  else if (status === 0) cls = (label === '违约') ? 'violation' : 'pending';
+  else if (status === 3) cls = 'away';
+  else if (status === 5) cls = 'supervised';
+  else if (label === '违约') cls = 'violation';
+  return `<span class="badge-status ${cls}">${escapeHtml(label || '待履约')}</span>`;
+}
+
+function formatUserCell(name, uid, avatar) {
+  const avatarUrl = avatar || (uid ? `https://photo.chaoxing.com/p/${uid}_80` : '');
+  const img = avatarUrl ? `<img class="user-avatar" src="${escapeHtml(avatarUrl)}" alt="" onerror="this.style.display='none'">` : '';
+  return `<div class="user-info-cell">
+    ${img}
+    <div>
+      <div><b>${escapeHtml(name || (uid ? 'UID ' + uid : '未知'))}</b></div>
+      ${uid ? `<div class="muted" style="font-size: 11px;">UID: ${escapeHtml(uid)}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+// 标签切换
+document.querySelectorAll('.sub-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const target = btn.dataset.subtab;
+    document.querySelector('#subtabSeatSection').classList.toggle('hidden', target !== 'seat');
+    document.querySelector('#subtabUserSection').classList.toggle('hidden', target !== 'user');
+    document.querySelector('#subtabProfileSection').classList.toggle('hidden', target !== 'profiles');
+    if (target === 'profiles') {
+      loadSeatUserProfiles().catch(e => setMessage(profileMessage, e.message));
+    }
+  });
+});
+
+// 按座位查询预约流水
+async function loadSeatReservations(event) {
+  if (event) event.preventDefault();
+  const roomId = seatSearchRoom.value;
+  const day = seatSearchDay.value;
+  const seatNum = seatSearchNum.value.trim();
+  if (!day) {
+    setMessage(seatSearchMessage, '请选择预约日期');
+    return;
+  }
+  setMessage(seatSearchMessage, '正在查询预约数据...');
+  seatReserveRows.innerHTML = '<tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">加载中...</td></tr>';
+  try {
+    let url = `/api/admin/seat-reservations?room_id=${encodeURIComponent(roomId)}&day=${encodeURIComponent(day)}`;
+    if (seatNum) url += `&seat_num=${encodeURIComponent(seatNum)}`;
+    const data = await api(url, { method: 'GET' });
+    const list = data.reservations || [];
+    if (!list.length) {
+      seatReserveRows.innerHTML = '<tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">未查到匹配的预约记录（可尝试点击右侧“实时同步学习通”）</td></tr>';
+      setMessage(seatSearchMessage, '查询完成，暂无记录', true);
+      return;
+    }
+    seatReserveRows.innerHTML = list.map(item => `
+      <tr>
+        <td>${escapeHtml(item.reserve_id || item.id)}</td>
+        <td><b>${escapeHtml(item.room_name || item.room_id)}</b></td>
+        <td>${escapeHtml(item.day)}</td>
+        <td><b style="font-family: var(--mono);">${escapeHtml(item.seat_num)}</b></td>
+        <td>${escapeHtml(item.time_range || `${item.start_time}-${item.end_time}`)}</td>
+        <td>${formatReserveBadge(item.status, item.status_label)}</td>
+        <td>${formatUserCell(item.user_name, item.uid, item.avatar_url)}</td>
+        <td><code>${escapeHtml(item.uid || '-')}</code></td>
+        <td class="muted">${escapeHtml(item.updated_at || item.created_at || '-')}</td>
+      </tr>
+    `).join('');
+    setMessage(seatSearchMessage, `共查询到 ${list.length} 条记录`, true);
+  } catch (err) {
+    seatReserveRows.innerHTML = `<tr><td colspan="9" class="bad" style="text-align: center; padding: 20px;">${escapeHtml(err.message)}</td></tr>`;
+    setMessage(seatSearchMessage, err.message);
+  }
+}
+
+// 实时抓取学习通占座并入库
+async function syncSeatReservationsRealtime() {
+  const roomId = seatSearchRoom.value;
+  const day = seatSearchDay.value;
+  if (!day) {
+    setMessage(seatSearchMessage, '请先选择预约日期');
+    return;
+  }
+  btnSyncSeatRealtime.disabled = true;
+  setMessage(seatSearchMessage, '正在从学习通抓取最新占座记录并入库...');
+  try {
+    const data = await api('/api/admin/seat-reservations/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ room_id: roomId, day: day })
+    });
+    setMessage(seatSearchMessage, `同步成功！已更新 ${data.saved_count || 0} 条占座记录`, true);
+    await loadSeatReservations();
+  } catch (err) {
+    setMessage(seatSearchMessage, `同步失败：${err.message}`);
+  } finally {
+    btnSyncSeatRealtime.disabled = false;
+  }
+}
+
+// 按人员反查预约座位流水
+async function loadUserReservations(event) {
+  if (event) event.preventDefault();
+  const keyword = userSearchKeyword.value.trim();
+  if (!keyword) {
+    setMessage(userSearchMessage, '请输入姓名、UID 或账号');
+    return;
+  }
+  setMessage(userSearchMessage, '正在反查该人员的座位记录...');
+  userReserveRows.innerHTML = '<tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">反查中...</td></tr>';
+  try {
+    const data = await api(`/api/admin/user-reservations?keyword=${encodeURIComponent(keyword)}`, { method: 'GET' });
+    const list = data.reservations || [];
+    if (!list.length) {
+      userReserveRows.innerHTML = '<tr><td colspan="9" class="muted" style="text-align: center; padding: 20px;">未查到该人员的任何座位预约流水</td></tr>';
+      setMessage(userSearchMessage, '查询完成，无记录', true);
+      return;
+    }
+    userReserveRows.innerHTML = list.map(item => `
+      <tr>
+        <td>${escapeHtml(item.reserve_id || item.id)}</td>
+        <td>${formatUserCell(item.user_name, item.uid, item.avatar_url)}</td>
+        <td><code>${escapeHtml(item.uid || '-')}</code></td>
+        <td><b>${escapeHtml(item.room_name || item.room_id)}</b></td>
+        <td>${escapeHtml(item.day)}</td>
+        <td><b style="font-family: var(--mono);">${escapeHtml(item.seat_num)}</b></td>
+        <td>${escapeHtml(item.time_range || `${item.start_time}-${item.end_time}`)}</td>
+        <td>${formatReserveBadge(item.status, item.status_label)}</td>
+        <td class="muted">${escapeHtml(item.updated_at || item.created_at || '-')}</td>
+      </tr>
+    `).join('');
+    setMessage(userSearchMessage, `反查到 ${list.length} 条流水`, true);
+  } catch (err) {
+    userReserveRows.innerHTML = `<tr><td colspan="9" class="bad" style="text-align: center; padding: 20px;">${escapeHtml(err.message)}</td></tr>`;
+    setMessage(userSearchMessage, err.message);
+  }
+}
+
+// UID 档案库列表与检索
+async function loadSeatUserProfiles(keyword = '') {
+  profileRows.innerHTML = '<tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">加载档案中...</td></tr>';
+  try {
+    let url = '/api/admin/seat-users?limit=100';
+    if (keyword) url += `&keyword=${encodeURIComponent(keyword)}`;
+    const data = await api(url, { method: 'GET' });
+    const list = data.users || [];
+    if (!list.length) {
+      profileRows.innerHTML = '<tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">档案库暂无匹配人员</td></tr>';
+      return;
+    }
+    profileRows.innerHTML = list.map(item => `
+      <tr>
+        <td><code>${escapeHtml(item.uid)}</code></td>
+        <td>${formatUserCell(item.real_name, item.uid, item.avatar_url)}</td>
+        <td>${escapeHtml(item.account || '-')}</td>
+        <td><span class="pill">${escapeHtml(item.source || 'session')}</span></td>
+        <td class="muted">${escapeHtml(item.updated_at || item.created_at || '-')}</td>
+        <td>
+          <button class="ghost" type="button" onclick="openEditProfileModal('${escapeHtml(item.uid)}', '${escapeHtml(item.real_name || '')}', '${escapeHtml(item.account || '')}')" style="min-height: 28px; padding: 3px 8px; font-size: 12px;">编辑实名</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    profileRows.innerHTML = `<tr><td colspan="6" class="bad" style="text-align: center; padding: 20px;">${escapeHtml(err.message)}</td></tr>`;
+    setMessage(profileMessage, err.message);
+  }
+}
+
+function openEditProfileModal(uid = '', realName = '', account = '') {
+  profileModalTitle.textContent = uid ? '编辑人员实名映射' : '录入新人员档案';
+  profileEditUid.value = uid || '';
+  profileEditUid.readOnly = !!uid;
+  profileEditRealName.value = realName || '';
+  profileEditAccount.value = account || '';
+  profileModal.classList.remove('hidden');
+}
+
+function closeProfileModal() {
+  profileModal.classList.add('hidden');
+  profileEditForm.reset();
+}
+
+async function saveProfileForm(event) {
+  event.preventDefault();
+  const uid = profileEditUid.value.trim();
+  const realName = profileEditRealName.value.trim();
+  const account = profileEditAccount.value.trim();
+  if (!uid || !realName) {
+    alert('UID 和真实姓名不能为空');
+    return;
+  }
+  try {
+    await api('/api/admin/seat-users/save', {
+      method: 'POST',
+      body: JSON.stringify({ uid, real_name: realName, account })
+    });
+    closeProfileModal();
+    setMessage(profileMessage, `已成功保存人员 [${realName} - ${uid}]`, true);
+    await loadSeatUserProfiles(profileSearchKeyword.value.trim());
+  } catch (err) {
+    alert(`保存失败：${err.message}`);
+  }
+}
+
+// 绑定事件
+seatSearchForm.addEventListener('submit', loadSeatReservations);
+btnSyncSeatRealtime.addEventListener('click', syncSeatReservationsRealtime);
+
+userSearchForm.addEventListener('submit', loadUserReservations);
+
+profileSearchForm.addEventListener('submit', event => {
+  event.preventDefault();
+  loadSeatUserProfiles(profileSearchKeyword.value.trim());
+});
+btnOpenAddProfileModal.addEventListener('click', () => openEditProfileModal('', '', ''));
+btnCloseProfileModal.addEventListener('click', closeProfileModal);
+btnCancelProfileModal.addEventListener('click', closeProfileModal);
+profileEditForm.addEventListener('submit', saveProfileForm);
+
+async function loadContactsStats() {
+  try {
+    const stats = await api('/api/admin/contacts/stats', { method: 'GET' });
+    if (statGroupUsers) statGroupUsers.textContent = stats.unique_group_users || 0;
+    if (statGroupCount) statGroupCount.textContent = stats.total_groups || 0;
+    if (statTotalProfiles) statTotalProfiles.textContent = stats.total_profiles || 0;
+  } catch (err) {
+    console.error('Failed to load contacts stats:', err);
+  }
+}
+
+async function syncAllChatgroups() {
+  if (!window.confirm('将从系统中所有有效会话爬取所在群聊的全部成员并沉淀至数据库，耗时约十几秒，继续吗？')) return;
+  btnSyncAllChatgroups.disabled = true;
+  setMessage(profileMessage, '正在爬取所有登录账号群聊通讯录，请稍候...');
+  try {
+    const res = await api('/api/admin/contacts/sync', { method: 'POST', body: '{}' });
+    setMessage(profileMessage, `同步成功！扫描了 ${res.total_groups_scanned || 0} 个群聊，沉淀保存了 ${res.total_records_saved || 0} 条成员记录`, true);
+    await loadContactsStats();
+    await loadSeatUserProfiles();
+  } catch (err) {
+    setMessage(profileMessage, `同步失败：${err.message}`);
+  } finally {
+    btnSyncAllChatgroups.disabled = false;
+  }
+}
+
+btnSyncAllChatgroups.addEventListener('click', syncAllChatgroups);
 
 loadMe().catch(() => showLogin());
 </script>

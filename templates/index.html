@@ -4,6 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>工职大座位雷达</title>
+  <script>
+    // 拦截与防御第三方浏览器插件（如沉浸式翻译扩展 content_main.js）在缺少 event.key 时引发的 toLowerCase 异常
+    (function() {
+      function polyfillEventKey(e) {
+        if (!e || typeof e.key === 'undefined') {
+          try {
+            Object.defineProperty(e, 'key', {
+              get: function() { return ''; },
+              configurable: true
+            });
+          } catch (_) {}
+        }
+      }
+      window.addEventListener('keydown', polyfillEventKey, true);
+      window.addEventListener('keyup', polyfillEventKey, true);
+      window.addEventListener('error', function(e) {
+        if (e && (e.filename && (e.filename.includes('content_main.js') || e.filename.includes('chrome-extension://')) || (e.message && e.message.includes('toLowerCase') && (!e.filename || e.filename.includes('content_main.js'))))) {
+          e.stopImmediatePropagation();
+          return true;
+        }
+      }, true);
+    })();
+  </script>
   <style>
     :root {
       color-scheme: light;
@@ -323,6 +346,12 @@
       background: var(--shelf-dark);
       color: #fff;
     }
+    .reserve-checkin.supervised {
+      background: #8e24aa;
+    }
+    .reserve-checkin.supervised:hover {
+      background: #6a1b9a;
+    }
     .reserve-empty {
       grid-column: 1 / -1;
       border: 1px dashed var(--line);
@@ -429,10 +458,33 @@
     .status-pill.done { background: var(--available-soft); color: #0a5a3b; }
     .status-pill.stop { background: #edf1ee; color: #5b6760; }
     .check-cell { width: 38px; text-align: center; }
+    .occupied-list { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+    .occupied-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; background: #f6faf7; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--soft-line); }
+    .occupied-filter-input { flex: 1; min-width: 220px; max-width: 360px; min-height: 36px; padding: 6px 12px; font-size: 13px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .occupied-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+    .occupied-card { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 4px 12px rgba(21, 33, 28, .03); transition: transform .16s ease, box-shadow .16s ease; }
+    .occupied-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(21, 33, 28, .07); }
+    .occupied-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .occupied-seat-num { font: 850 16px/1 var(--mono-font); color: var(--ink); background: #eef4f0; padding: 4px 8px; border-radius: 4px; }
+    .occupied-time-row { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #3b4d45; font-family: var(--mono-font); font-weight: 700; }
+    .occupied-user-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding-top: 8px; border-top: 1px dashed var(--soft-line); }
+    .occupied-user-avatar { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; border: 2px solid #e0eae3; background: #eef3ef; flex-shrink: 0; }
+    .occupied-user-avatar-placeholder { width: 38px; height: 38px; border-radius: 50%; background: #eef3ef; border: 2px solid #e0eae3; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+    .occupied-user-info { overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
+    .occupied-user-name { font-weight: 800; font-size: 14px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .occupied-user-uid { font-size: 12px; color: var(--muted); font-family: var(--mono-font); }
+    .badge-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .badge-success { background: #dff2e8; color: #106642; }
+    .badge-warning { background: #fff1d6; color: #9c6000; }
+    .badge-danger { background: #fde8e5; color: #b82d1c; }
+    .badge-info { background: #e0f2fe; color: #0369a1; }
+    .badge-purple { background: #f3e8ff; color: #7e22ce; }
+    .badge-neutral { background: #f0f3f1; color: #475569; }
     .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 22px; background: rgba(17, 32, 28, .48); backdrop-filter: blur(8px); }
     .modal-panel { width: min(1120px, 100%); max-height: min(780px, calc(100vh - 44px)); overflow: auto; background: #fff; border-radius: 8px; border: 1px solid var(--line); box-shadow: 0 24px 80px rgba(17, 32, 28, .24); padding: 20px; }
     .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .modal-head h2 { margin: 0 0 6px; }
+
     .modal-empty { border: 1px solid #e5c178; background: #fff8e8; color: #7b4d0a; border-radius: 8px; padding: 14px; }
     .alert-panel { width: min(520px, 100%); border-top: 5px solid var(--available); }
     .alert-seat-list { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: var(--available-soft); color: #0b4d35; line-height: 1.55; font-family: var(--mono-font); }
@@ -998,10 +1050,13 @@
           <div class="tabs">
             <button class="tab active" type="button" data-tab="seats">可预约座位</button>
             <button class="tab" type="button" data-tab="pairs">双人连排</button>
+            <button class="tab" type="button" data-tab="occupied">已占用 / 谁在约</button>
           </div>
           <div id="seatGrid" class="seat-grid"></div>
           <div id="pairGrid" class="seat-grid pair-grid hidden"></div>
+          <div id="occupiedList" class="occupied-list hidden"></div>
         </div>
+
       </section>
 
       <section id="timetableSection" class="app-view hidden" data-app-view>
@@ -1259,10 +1314,13 @@
         <div class="tabs">
           <button class="tab active" type="button" data-modal-tab="seats">可预约座位</button>
           <button class="tab" type="button" data-modal-tab="pairs">双人连排</button>
+          <button class="tab" type="button" data-modal-tab="occupied">已占用 / 谁在约</button>
         </div>
         <div id="modalSeatGrid" class="seat-grid"></div>
         <div id="modalPairGrid" class="seat-grid pair-grid hidden"></div>
+        <div id="modalOccupiedList" class="occupied-list hidden"></div>
       </div>
+
     </div>
   </div>
 
@@ -1367,6 +1425,7 @@ const resultsEmpty = document.querySelector('#resultsEmpty');
 const resultsContent = document.querySelector('#resultsContent');
 const seatGrid = document.querySelector('#seatGrid');
 const pairGrid = document.querySelector('#pairGrid');
+const occupiedList = document.querySelector('#occupiedList');
 const timetableDownloadBtn = document.querySelector('#timetableDownloadBtn');
 const timetableEmpty = document.querySelector('#timetableEmpty');
 const timetableContent = document.querySelector('#timetableContent');
@@ -1396,6 +1455,8 @@ const historyModalEmpty = document.querySelector('#historyModalEmpty');
 const historyModalContent = document.querySelector('#historyModalContent');
 const modalSeatGrid = document.querySelector('#modalSeatGrid');
 const modalPairGrid = document.querySelector('#modalPairGrid');
+const modalOccupiedList = document.querySelector('#modalOccupiedList');
+
 const watchAlertModal = document.querySelector('#watchAlertModal');
 const watchAlertMeta = document.querySelector('#watchAlertMeta');
 const watchAlertSeats = document.querySelector('#watchAlertSeats');
@@ -1743,9 +1804,11 @@ function renderCurrentReserves(reserves) {
       item.day,
       item.time_range
     ].filter(Boolean).join(' · ');
-    const checkinTitle = item.checkin_time_range ? `签到时间 ${item.checkin_time_range}` : '签到';
+    const checkinTitle = item.status === 5
+      ? '监督中，请尽快签到解除监督'
+      : (item.checkin_time_range ? `签到时间 ${item.checkin_time_range}` : '签到');
     const checkinLink = item.checkin_available && item.checkin_url
-      ? `<a class="reserve-checkin" href="${escapeHtml(item.checkin_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(checkinTitle)}">签到</a>`
+      ? `<a class="reserve-checkin ${item.status === 5 ? 'supervised' : ''}" href="${escapeHtml(item.checkin_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(checkinTitle)}">签到</a>`
       : '';
     const body = `<span class="reserve-seat">${escapeHtml(item.seat_num || '-')}</span>
       <span class="reserve-main">
@@ -2218,19 +2281,66 @@ function renderResults(result) {
   document.querySelector('#statOccupied').textContent = result.summary.occupied;
   document.querySelector('#statFiltered').textContent = result.summary.filtered || 0;
   document.querySelector('#statPairs').textContent = result.summary.pairs;
-  renderSeatLists(result, seatGrid, pairGrid);
+  renderSeatLists(result, seatGrid, pairGrid, occupiedList);
   setTab('seats');
   switchAppView('resultsPanel');
 }
 
-function renderSeatLists(result, seatTarget, pairTarget) {
+function renderSeatLists(result, seatTarget, pairTarget, occupiedTarget) {
   seatTarget.innerHTML = result.available.map(item =>
     `<a class="seat" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.seat)}</a>`
   ).join('') || '<div class="muted">没有可预约座位</div>';
   pairTarget.innerHTML = result.pairs.map(item =>
     `<a class="pair" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.seats.join(' + '))}</a>`
   ).join('') || '<div class="muted">没有双人连排</div>';
+
+  if (occupiedTarget) {
+    const details = result.occupied_details || [];
+    if (!details.length) {
+      occupiedTarget.innerHTML = '<div class="muted" style="padding:16px;">当前时段无占用记录或座位全部空闲</div>';
+      return;
+    }
+    occupiedTarget.innerHTML = `
+      <div class="occupied-toolbar">
+        <input type="text" class="occupied-filter-input" placeholder="输入座位号 / 姓名 / UID 快速筛选..." oninput="filterOccupiedList(this, '${occupiedTarget.id}')">
+        <div class="muted">共 <b>${details.length}</b> 条占用记录</div>
+      </div>
+      <div class="occupied-cards-grid">
+        ${details.map(item => `
+          <div class="occupied-card" data-search="${escapeHtml(((item.seat_num || '') + ' ' + (item.user_name || '') + ' ' + (item.uid || '')).toLowerCase())}">
+            <div class="occupied-card-top">
+              <div class="occupied-seat-num">#${escapeHtml(item.seat_num)}</div>
+              <span class="badge-status badge-${escapeHtml(item.badge_type || 'neutral')}">${escapeHtml(item.status_label || '已占用')}</span>
+            </div>
+            <div class="occupied-time-row">
+              <span>🕒</span>
+              <span class="occupied-time">${escapeHtml(item.time_range || (item.start_time + '-' + item.end_time))}</span>
+            </div>
+            <div class="occupied-user-row">
+              ${item.avatar_url ? `<img class="occupied-user-avatar" src="${escapeHtml(item.avatar_url)}" alt="avatar" onerror="this.style.display='none'" />` : '<div class="occupied-user-avatar-placeholder">👤</div>'}
+              <div class="occupied-user-info">
+                <div class="occupied-user-name">${escapeHtml(item.user_name || '超星用户')}</div>
+                <div class="occupied-user-uid">UID: ${escapeHtml(String(item.uid))}</div>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
 }
+
+function filterOccupiedList(input, targetId) {
+  const query = (input.value || '').trim().toLowerCase();
+  const container = document.getElementById(targetId);
+  if (!container) return;
+  const cards = container.querySelectorAll('.occupied-card');
+  cards.forEach(card => {
+    const text = card.getAttribute('data-search') || '';
+    card.style.display = (!query || text.includes(query)) ? '' : 'none';
+  });
+}
+
 
 function renderTimetable(timetable) {
   latestTimetable = timetable;
@@ -2286,7 +2396,7 @@ function openHistoryModal(result) {
   document.querySelector('#modalStatOccupied').textContent = result.summary.occupied;
   document.querySelector('#modalStatFiltered').textContent = result.summary.filtered || 0;
   document.querySelector('#modalStatPairs').textContent = result.summary.pairs;
-  renderSeatLists(result, modalSeatGrid, modalPairGrid);
+  renderSeatLists(result, modalSeatGrid, modalPairGrid, modalOccupiedList);
   setModalTab('seats');
   historyModal.classList.remove('hidden');
 }
@@ -2350,6 +2460,7 @@ function setTab(tab) {
   document.querySelectorAll('[data-tab]').forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
   seatGrid.classList.toggle('hidden', tab !== 'seats');
   pairGrid.classList.toggle('hidden', tab !== 'pairs');
+  if (occupiedList) occupiedList.classList.toggle('hidden', tab !== 'occupied');
 }
 
 function setModalTab(tab) {
@@ -2358,7 +2469,9 @@ function setModalTab(tab) {
   });
   modalSeatGrid.classList.toggle('hidden', tab !== 'seats');
   modalPairGrid.classList.toggle('hidden', tab !== 'pairs');
+  if (modalOccupiedList) modalOccupiedList.classList.toggle('hidden', tab !== 'occupied');
 }
+
 
 authForm.addEventListener('submit', async event => {
   event.preventDefault();

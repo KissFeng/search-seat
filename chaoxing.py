@@ -392,13 +392,40 @@ def query_seats(
     return resp.json()
 
 
+def parse_seat_reserves(result: dict, seat_width: int = config.SEAT_WIDTH) -> list:
+    raw_reserves = result.get("data", {}).get("seatReserves", [])
+    if not isinstance(raw_reserves, list):
+        return []
+    reserves = []
+    for item in raw_reserves:
+        if not isinstance(item, dict):
+            continue
+        seat_num = item.get("seatNum")
+        if seat_num is None:
+            continue
+        reserves.append(
+            {
+                "id": item.get("id"),
+                "roomId": str(item.get("roomId") or ""),
+                "seatNum": normalize_seat_num(seat_num, seat_width),
+                "startTime": item.get("startTime"),
+                "endTime": item.get("endTime"),
+                "status": item.get("status"),
+                "uid": item.get("uid"),
+                "today": str(item.get("today") or ""),
+                "rDeptId": item.get("rDeptId"),
+                "room_id": str(item.get("roomId") or ""),
+                "seat_num": normalize_seat_num(seat_num, seat_width),
+                "start_time": item.get("startTime"),
+                "end_time": item.get("endTime"),
+            }
+        )
+    return reserves
+
+
 def get_occupied_seats(result: dict, seat_width: int = config.SEAT_WIDTH) -> set:
-    seat_reserves = result.get("data", {}).get("seatReserves", [])
-    return {
-        normalize_seat_num(item.get("seatNum"), seat_width)
-        for item in seat_reserves
-        if item.get("seatNum") is not None
-    }
+    reserves = parse_seat_reserves(result, seat_width)
+    return {item["seatNum"] for item in reserves if item.get("seatNum")}
 
 
 def get_available_seats(result: dict, all_seats: list, seat_width: int = config.SEAT_WIDTH) -> list:
